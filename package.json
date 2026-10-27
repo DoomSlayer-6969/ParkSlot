@@ -1,0 +1,19 @@
+{
+  "name": "parkslot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prototype parking slot booking app: find nearby parking, view slot availability, book and pay online.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

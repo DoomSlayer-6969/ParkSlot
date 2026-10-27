@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ParkSlot — Attendant check-in</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="attendant">
+  <header class="topbar">
+    <a class="brand" href="/"><span class="logo">P</span> ParkSlot</a>
+    <span class="muted">Attendant check-in</span>
+  </header>
+
+  <main class="narrow">
+    <form id="checkin-form" class="form card">
+      <h1>Check a driver in</h1>
+      <p class="muted small">Enter the booking ID the driver shows on arrival.</p>
+      <label>Attendant key <input name="key" type="password" required autocomplete="off"></label>
+      <label>Booking ID <input name="code" required placeholder="PK-XXXX-XXXX" autocomplete="off" class="code-input"></label>
+      <div class="actions"><button class="btn primary">Check in</button></div>
+    </form>
+    <div id="result" aria-live="polite"></div>
+  </main>
+
+  <script type="module" src="attendant.js"></script>
+</body>
+</html>
