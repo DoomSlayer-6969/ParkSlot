@@ -2,12 +2,10 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { test } from 'node:test';
-import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
 import { createAccount } from '../src/services/auth.js';
 import { welcomeEmail } from '../src/services/emails.js';
 import { createMailerFromConfig, createSmtpMailer } from '../src/services/mailer.js';
-import { createMockGateway } from '../src/services/payments.js';
+import { startServer } from './support/server.js';
 
 const DRIVER = { name: 'Dana Driver', email: 'dana@test.dev', password: 'password1' };
 
@@ -76,16 +74,8 @@ async function waitFor(check, timeout = 3000) {
 }
 
 async function startApp(t, mailer) {
-  const db = openDb(':memory:');
-  const server = createApp({ db, gateway: createMockGateway(), mailer }).listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  t.after(() => server.close());
-  const register = async (body) => {
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/auth/register`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    return { status: res.status, body: await res.json() };
-  };
+  const { db, call } = await startServer(t, { mailer });
+  const register = (body) => call('/api/auth/register', { method: 'POST', body });
   return { db, register };
 }
 
@@ -101,6 +91,8 @@ test('signing up sends a welcome email; failed sign-ups send none', async (t) =>
   assert.match(mail.text, /^Hi Dana Driver,/);
   assert.match(mail.text, /log in at http:\/\/localhost:\d+\/ with this email address \(dana@test\.dev\)/);
   assert.match(mail.text, /Forgot password\?/);
+  assert.match(mail.text, /QR code/);
+  assert.doesNotMatch(mail.text, /booking ID/i); // check-in is by QR code, not a code read out at the gate
 
   assert.equal((await register(DRIVER)).status, 409); // duplicate
   assert.equal((await register({ ...DRIVER, email: 'x@test.dev', password: 'short' })).status, 400);

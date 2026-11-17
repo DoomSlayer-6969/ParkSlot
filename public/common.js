@@ -43,6 +43,31 @@ export async function request(path, { method = 'GET', body, headers = {} } = {})
   return data;
 }
 
+/**
+ * A portal's API client and session: keeps the session token in `storage` under `tokenKey` (each portal
+ * has its own key), sends it as a Bearer token, and calls `onSignedOut()` when a signed-in request comes
+ * back with one of `signOutStatuses` (the session expired or belongs to the other portal).
+ */
+export function createApiClient({ tokenKey, signOutStatuses = [401], onSignedOut }) {
+  let token = storage.get(tokenKey);
+  return {
+    get token() { return token; },
+    setToken(value) {
+      token = value;
+      storage.set(tokenKey, value);
+    },
+    async call(path, options = {}) {
+      const sentWith = token;
+      try {
+        return await request(path, { ...options, headers: sentWith ? { Authorization: `Bearer ${sentWith}` } : {} });
+      } catch (err) {
+        if (sentWith && sentWith === token && signOutStatuses.includes(err.status)) onSignedOut?.();
+        throw err;
+      }
+    },
+  };
+}
+
 export const STATUS_TEXT = {
   free: 'Free',
   booked: 'Booked',
@@ -55,6 +80,8 @@ export const STATUS_TEXT = {
   cancelled: 'Cancelled',
   expired: 'Expired',
 };
+
+export const statusBadge = (status) => `<span class="badge status-${esc(status)}">${STATUS_TEXT[status] ?? esc(status)}</span>`;
 
 export const PAYMENT_TEXT = {
   succeeded: 'Paid',

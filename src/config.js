@@ -1,3 +1,4 @@
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const MINUTE_MS = 60_000;
@@ -7,6 +8,7 @@ export const DAY_MS = 24 * HOUR_MS;
 const env = process.env;
 
 const port = Number(env.PORT ?? 3000);
+const dbFile = env.DB_FILE ?? fileURLToPath(new URL('../data/parking.db', import.meta.url));
 
 export const config = {
   port,
@@ -23,7 +25,15 @@ export const config = {
   },
   // Sender of every email, e.g. "ParkSlot <no-reply@example.com>". Required when SMTP is configured.
   mailFrom: env.MAIL_FROM || null,
-  dbFile: env.DB_FILE ?? fileURLToPath(new URL('../data/parking.db', import.meta.url)),
+  dbFile,
+  // Optional second listener with TLS, for local development: browsers only allow the camera (the admin
+  // QR scanner) on https:// or http://localhost, so phones on the same network need HTTPS.
+  httpsPort: env.HTTPS_PORT ? Number(env.HTTPS_PORT) : null,
+  // Your own certificate and key (PEM). Without them, a self-signed one is generated in tlsDir.
+  tlsCertFile: env.TLS_CERT_FILE || null,
+  tlsKeyFile: env.TLS_KEY_FILE || null,
+  // Generated certificates live next to the database (data/tls/ by default).
+  tlsDir: join(dirname(dbFile), 'tls'),
   // ISO 4217 code; all amounts are stored in the currency's smallest unit (paise, cents...).
   currency: env.CURRENCY ?? 'INR',
   // Where the map opens and where demo data is seeded.

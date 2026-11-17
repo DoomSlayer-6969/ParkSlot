@@ -1,57 +1,26 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { createAccount } from '../src/services/auth.js';
-import { createMockGateway, TEST_CARDS } from '../src/services/payments.js';
 import { decodeQrSvg } from './support/qr.js';
+import { bookAndPay, startServer as startTestServer } from './support/server.js';
 
 const ADMIN = { name: 'Admin', email: 'admin@test.dev', password: 'password1' };
 const DRIVER = { name: 'Driver', email: 'driver@test.dev', password: 'password1' };
 
-async function bookAndPay(call, token) {
-  const hold = (await call('/api/bookings', { token, method: 'POST', body: { slotId: 1, startAt: Date.now(), hours: 1 } })).body;
-  const card = { name: 'D', number: TEST_CARDS.success, expiry: '12/49', cvc: '123' };
-  return (await call(`/api/bookings/${hold.id}/pay`, { token, method: 'POST', body: { card } })).body;
-}
-
-/** Runs the real HTTP app on a random port against an in-memory DB. */
-async function startServer(t) {
-  const db = openDb(':memory:');
+/** One spot with one slot, and an admin account. */
+function fixtures(db) {
   db.exec(`
     INSERT INTO parking_spots (id, name, address, lat, lng, hourly_rate) VALUES (1, 'Lot', '1 Test Rd', 10, 20, 5000);
     INSERT INTO slots (id, spot_id, label) VALUES (1, 1, 'A1');
   `);
   createAccount(db, { ...ADMIN, role: 'admin' }, Date.now());
-
-  const outbox = [];
-  const mailer = { send: async (message) => { outbox.push(message); } };
-  const server = createApp({ db, gateway: createMockGateway(), mailer }).listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  t.after(() => server.close());
-  const base = `http://127.0.0.1:${server.address().port}`;
-
-  const call = async (path, { token, method = 'GET', body } = {}) => {
-    const res = await fetch(base + path, {
-      method,
-      redirect: 'manual',
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const type = res.headers.get('content-type') ?? '';
-    const data = type.includes('application/json') ? await res.json() : type.includes('svg') ? await res.text() : null;
-    return { status: res.status, headers: res.headers, body: data };
-  };
-  return { db, call, outbox };
 }
+const startServer = (t) => startTestServer(t, { setup: fixtures });
 
 test('drivers and admins sign in to separate portals, and each session works only in its own', async (t) => {
   const { call } = await startServer(t);

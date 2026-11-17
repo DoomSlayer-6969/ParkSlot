@@ -5,7 +5,7 @@
 //   screenshot home
 //   EOF
 // Exits 1 on the first failing command (after saving shots/error.png).
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const PORT = process.env.PORT ?? 3123;
@@ -57,7 +57,8 @@ const send = (method, params = {}) => new Promise((resolve, reject) => {
   ws.send(JSON.stringify({ id, method, params }));
 });
 
-await send('session.new', { capabilities: {} });
+// ACCEPT_INSECURE_CERTS=1 lets it open the server's self-signed HTTPS port (HTTPS_PORT in stack.sh).
+await send('session.new', { capabilities: process.env.ACCEPT_INSECURE_CERTS === '1' ? { alwaysMatch: { acceptInsecureCerts: true } } : {} });
 await send('session.subscribe', { events: ['log.entryAdded'] });
 const context = (await send('browsingContext.getTree', {})).contexts[0].context;
 await send('browsingContext.setViewport', { context, viewport: { width: 1280, height: 900 } });
@@ -71,6 +72,7 @@ function deserialize(v) {
   if (!v) return undefined;
   if (v.type === 'array') return v.value.map(deserialize);
   if (v.type === 'object') return Object.fromEntries(v.value.map(([k, x]) => [typeof k === 'string' ? k : deserialize(k), deserialize(x)]));
+  if (v.type === 'null' || v.type === 'undefined') return null;
   return v.value ?? v.type;
 }
 async function waitUntil(expression, what) {
@@ -81,7 +83,8 @@ async function waitUntil(expression, what) {
     await new Promise((r) => setTimeout(r, 150));
   }
 }
-let shotNo = 0;
+// Numbering continues across driver runs, so a later run never overwrites an earlier run's screenshots.
+let shotNo = readdirSync(SHOTS).filter((f) => f.endsWith('.png')).length;
 async function screenshot(name = 'shot') {
   const { data } = await send('browsingContext.captureScreenshot', { context });
   const file = join(SHOTS, `${String(++shotNo).padStart(2, '0')}-${name}.png`);

@@ -70,14 +70,29 @@ npm run create-admin -- --name "Asha Rao" --email asha@example.com --password 'a
 
 Every check-in records how it happened (`qr` or `manual`) and which admin did it, shown in the booking's details.
 
-The camera needs a secure context: it works on `http://localhost` and over HTTPS, but not over plain HTTP on another address. Handheld scanners work anywhere.
+### Scanning with a phone or tablet
+
+Browsers only allow the camera in a secure context. `http://localhost` (and `http://127.0.0.1`) counts, so the scanner works on the computer running the server with no setup. A phone opening `http://192.168.x.x:3000/admin/` does not, and the portal says so. For other devices, turn on the HTTPS port:
+
+```bash
+HTTPS_PORT=3443 npm run dev      # or put HTTPS_PORT=3443 in .env
+```
+
+The server keeps serving HTTP on `PORT` and also serves HTTPS on `HTTPS_PORT`. At start-up it prints the address to open on a phone, e.g. `https://192.168.1.43:3443/admin/`. With no certificate of your own, it creates a self-signed one with `openssl` in `data/tls/` (next to the database), valid for `localhost`, `127.0.0.1` and this machine's network addresses. It makes a new one when the machine's address changes. Browsers warn about a self-signed certificate once: choose **Advanced → Proceed/Continue**, and then the camera works. To use a real certificate, set `TLS_CERT_FILE` and `TLS_KEY_FILE`. The admin portal opened over plain HTTP on a network address links to the HTTPS address.
+
+When the camera doesn't start, the portal says why: the site is blocked in the browser (and how to allow it), the prompt was dismissed, the operating system is blocking the browser, there's no camera, or another app is using it. Handheld scanners work anywhere.
 
 ## Project layout
 
 ```
 src/
-  server.js              entry point (auto-seeds an empty DB)
-  app.js                 Express routes + error handling
+  server.js              entry point: HTTP (and optional HTTPS) listeners, auto-seeds an empty DB
+  app.js                 builds the Express app: static files, routers, error handling
+  http.js                request helpers: number parsing, list paging, role guard
+  routes/
+    driver.js            /api: driver accounts, spots, bookings, QR pass
+    admin.js             /api/admin: staff sign-in, check-in, all bookings
+  tls.js                 certificates for the optional HTTPS port (self-signed via openssl)
   config.js              env-driven settings
   db.js                  schema, connection, transaction helper
   seed.js                demo data (also a CLI: npm run seed)
@@ -93,16 +108,21 @@ src/
     mailer.js            SMTP mailer (nodemailer) or console mailer, chosen from env
     emails.js            email templates: welcome, password reset
     auth.js              accounts and roles, scrypt password hashing, sessions
-public/                  static frontend (vanilla JS + Leaflet, no build step)
-  index.html, app.js     driver app
-  admin/                 admin portal: QR check-in (scanner.js: camera) and all bookings
-  common.js, styles.css  shared by both
+    password-reset.js    reset links for driver accounts
+public/                  static frontend (vanilla JS ES modules + Leaflet, no build step)
+  index.html, app.js     driver app (app.js wires up the modules in driver/)
+  driver/                session, modal, finder (map/search/spots), booking, pass, my-bookings, account
+  admin/                 admin portal: admin.js (entry), session, checkin, scanner (camera), bookings
+  common.js, styles.css  shared by both: request + API client, formatting, status badges
 test/
   bookings.test.js       booking rules, history and admin search (service level)
   password-reset.test.js reset links: expiry, single use, throttling, session sign-out
   email.test.js          welcome email, SMTP delivery against a fake SMTP server, mailer failures
   portals.test.js        portal separation, QR check-in and API flows over HTTP, schema migrations
-  support/qr.js          decodes the served QR SVGs the way a scanner would (test helper)
+  tls.test.js            development certificate generation and serving over HTTPS
+  scanner.test.js        camera error messages
+  support/server.js      test helpers: start the app on a random port, fake mailer, book and pay
+  support/qr.js          decodes the served QR SVGs the way a scanner would
 ```
 
 ## API
@@ -111,7 +131,7 @@ test/
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/config` | – | currency, default map centre, limits |
+| GET | `/api/config` | – | currency, default map centre, limits, `httpsPort` (or `null`) |
 | POST | `/api/auth/register` · `/api/auth/login` | – | driver sign-up / sign-in, returns `{ token, user }` |
 | GET | `/api/auth/me` · POST `/api/auth/logout` | Driver | session |
 | POST | `/api/auth/password-reset/request` `{ email }` | – | email a reset link; always `202` with the same message |
@@ -144,15 +164,17 @@ Booking lists return `{ bookings, has_more, next_offset }`. `limit` defaults to 
 | `SMTP_SECURE` | `true` when `SMTP_PORT` is 465, otherwise `false` (STARTTLS is used when the server offers it) |
 | `SMTP_USER`, `SMTP_PASS` | unset: no SMTP login |
 | `MAIL_FROM` | required when `SMTP_HOST` is set, e.g. `ParkSlot <no-reply@example.com>` |
+| `HTTPS_PORT` | unset: HTTP only. Set (e.g. `3443`) to also serve HTTPS, so the camera scanner works on phones ([details](#scanning-with-a-phone-or-tablet)) |
+| `TLS_CERT_FILE`, `TLS_KEY_FILE` | unset: a self-signed certificate is generated in `tls/` next to the database (needs `openssl`) |
+| `DB_FILE` | `data/parking.db` |
+| `CURRENCY` | `INR` |
+| `DEFAULT_LAT`, `DEFAULT_LNG` | `28.6315`, `77.2167` (New Delhi) |
 
 `npm start` and `npm run dev` load a `.env` file if there is one (gitignored). `.env.example` lists the settings.
 
 ### Sending real email
 
 Set `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM` for any SMTP provider (Amazon SES, Postmark, Mailgun, SendGrid, Gmail with an app password, …) and set `PUBLIC_URL` to the site's real address. At start-up the server says which mode it is in, and warns if it cannot reach or log in to the SMTP server. If `MAIL_FROM` is missing, the server refuses to start.
-| `DB_FILE` | `data/parking.db` |
-| `CURRENCY` | `INR` |
-| `DEFAULT_LAT`, `DEFAULT_LNG` | `28.6315`, `77.2167` (New Delhi) |
 
 ## Prototype limitations / next steps
 

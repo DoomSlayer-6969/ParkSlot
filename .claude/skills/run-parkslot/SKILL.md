@@ -83,7 +83,28 @@ screenshot manual-checkin
 EOF
 ```
 
-Each command prints `> line`. Screenshots print their path and land in `${TMPDIR:-/tmp}/parkslot-run/shots/NN-<name>.png`, so **open them with Read and look**. On the first failure the driver prints `FAILED: …`, saves `NN-error.png` and exits 1. At the end it prints any `[error]` console messages.
+**Camera scanner and HTTPS.** `FAKE_CAMERA=1` gives Firefox a synthetic camera with no permission prompt. `HTTPS_PORT` makes the server also serve HTTPS with a self-signed certificate (created in the run dir), and `ACCEPT_INSECURE_CERTS=1` lets the driver open it. This checks the camera on localhost, the "use HTTPS" hint on the plain-HTTP network address, and the camera over HTTPS on that address (replace `192.168.1.43` with this machine's address from `ip -4 addr`; the server log lists it):
+
+```bash
+FAKE_CAMERA=1 HTTPS_PORT=3443 .claude/skills/run-parkslot/stack.sh up
+for url in http://localhost:3123/admin/ http://192.168.1.43:3123/admin/ https://192.168.1.43:3443/admin/; do
+ACCEPT_INSECURE_CERTS=1 node .claude/skills/run-parkslot/driver.mjs <<EOF
+nav $url
+fill #login-form>label>[name=email] admin@parking.test
+fill #login-form>label>[name=password] admin1234
+submit #login-form
+wait-for #camera-btn
+click #camera-btn
+sleep 2500
+eval ({ secure: window.isSecureContext, status: document.querySelector('#scanner-status').innerText, video: document.querySelector('#scanner-video').videoWidth })
+screenshot camera
+EOF
+done
+```
+
+Expected: localhost and the HTTPS address show `video: 640` and "Hold the QR code inside the frame." The plain-HTTP network address shows `secure: false` and a link to the HTTPS portal. The fake feed is a plain colour, so it never contains a QR code: test decoding with `decode-qr` plus the handheld input, as in the first flow.
+
+Each command prints `> line`. Screenshots print their path and land in `${TMPDIR:-/tmp}/parkslot-run/shots/NN-<name>.png` (numbering continues across driver runs), so **open them with Read and look**. On the first failure the driver prints `FAILED: …`, saves `NN-error.png` and exits 1. At the end it prints any `[error]` console messages.
 
 | command | what it does |
 |---|---|
@@ -138,19 +159,19 @@ npm run dev     # http://localhost:3000 on data/parking.db, restarts on save. Ct
 ## Test
 
 ```bash
-npm test        # 41 tests: services, HTTP portals, email, password reset, migrations
+npm test        # 46 tests: services, HTTP portals, email, password reset, migrations, HTTPS, camera messages
 ```
 
 ## Gotchas
 
-- **Stay off port 3000 and `data/parking.db`.** The user usually has `npm run dev` running there, and `node --watch` re-runs `migrate()` against `data/parking.db` on every save. `stack.sh` uses port 3123 and its own DB, and its `down` only kills what is listening on 3123 plus the Firefox running with its own profile.
+- **Stay off port 3000 and `data/parking.db`.** The user usually has `npm run dev` running there, and `node --watch` restarts it and re-runs `migrate()` against `data/parking.db` on every save. After big edits, check that it still answers: `curl -s localhost:3000/api/config`. `stack.sh` uses port 3123 and its own DB, and its `down` only kills what is listening on 3123 plus the Firefox running with its own profile.
 - **`stack.sh up` wipes the previous run**, screenshots included. Read or copy the screenshots before running `up` again.
 - **Login persists across driver runs.** Each `up` makes a fresh Firefox profile, but within one `up` the app's `localStorage` token survives, so a second `nav /` lands already logged in and `#login-btn` doesn't exist. Run `up` again, or `click #logout-btn` first. The same applies to `adminToken` in the admin portal.
 - **One BiDi session at a time.** The driver ends its session even on failure. If a driver process is killed mid-run, the next one fails with `session not created: Maximum number of active sessions`, and `stack.sh up` fixes it.
 - **Selectors can't contain spaces** (`fill` splits on the first space). Use child combinators: `#pay-form>.row>label>[name=cvc]`.
 - **Pick a spot with space.** The first spot in the list can be full, and every run books more slots. `click .badge.ok` opens the nearest spot that has a free slot.
 - **My bookings → Upcoming is sorted by start time**, and the demo driver owns dozens of seeded bookings that have already started (checked in). A booking you just made can be past the first page, so click `#load-more`, or register a new driver for clean lists.
-- **No camera in headless.** **Scan with camera** shows "Camera access was blocked…". Test scanning with `decode-qr` plus the handheld-scanner input, as in the flow above. Firefox has no `BarcodeDetector`, so this exercises the jsQR fallback. Chrome's native path can't be tested here.
+- **Headless has no camera** unless you use `FAKE_CAMERA=1`. Without it, **Scan with camera** reports "The camera was not allowed…". To test a specific camera failure message, stub it first: `eval navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('x', 'NotReadableError'))`. Firefox has no `BarcodeDetector`, so this exercises the jsQR fallback. Chrome's native path can't be tested here.
 - **Headless reports `(pointer: fine)` as false**, so the admin portal does not auto-focus the scanner input (deliberate on touch devices). Use `fill`, and don't assert on focus.
 - **Lists are paged (20 rows).** A booking you're looking for in the admin **Bookings** table may not be on the first page. Search for its reference (`fill #booking-search>[name=q] PK-…`), or `eval` a `fetch('/api/admin/bookings?…', { headers: { Authorization: 'Bearer ' + localStorage.getItem('adminToken') } })` to find IDs and epoch-ms times.
 - **Never `pkill -f` a pattern that appears in your own command line** (such as a script name you're also running). It kills the agent's own shell (exit 144). `stack.sh down` matches only Firefox's `--profile <run dir>` argument and the port-3123 listener.

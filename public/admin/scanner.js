@@ -44,11 +44,41 @@ async function createDecoder() {
   };
 }
 
-function cameraError(err) {
-  if (err.name === 'NotAllowedError') return 'Camera access was blocked. Allow it in the browser’s site settings, or use a handheld scanner.';
-  if (err.name === 'NotFoundError' || err.name === 'OverconstrainedError') return 'No camera was found on this device.';
-  if (err.name === 'NotReadableError') return 'The camera is being used by another app.';
-  return err.message || 'Could not start the camera.';
+/**
+ * What to tell staff when the camera does not start. `err` is what getUserMedia threw; `permission` is the
+ * camera permission state afterwards ('granted' | 'denied' | 'prompt', or null where the browser can't say).
+ */
+export function cameraErrorMessage(err, permission = null) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+      if (/system/i.test(err.message)) {
+        return 'Your computer is not letting the browser use the camera. Allow the browser in the system privacy settings (Camera), then try again.';
+      }
+      if (permission === 'denied') {
+        return 'Camera access is blocked for this site. Click the camera or padlock icon in the address bar, allow the camera, then press "Scan with camera" again.';
+      }
+      return 'The camera was not allowed. Press "Scan with camera" again and choose Allow when the browser asks.';
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No camera was found. Connect one, or use a handheld scanner.';
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return 'The camera could not be opened. It may be in use by another app or browser tab: close that and try again.';
+    case 'SecurityError':
+      return 'The browser does not allow the camera on this page. Open the portal over HTTPS or on localhost.';
+    case 'AbortError':
+      return 'The camera stopped while starting. Try again.';
+    default:
+      return err?.message || 'Could not start the camera.';
+  }
+}
+
+async function cameraPermission() {
+  try {
+    return (await navigator.permissions.query({ name: 'camera' })).state;
+  } catch {
+    return null; // not supported by this browser
+  }
 }
 
 /**
@@ -56,16 +86,15 @@ function cameraError(err) {
  * (repeatedly, while a code stays in view). Resolves to a function that stops the camera.
  */
 export async function startScanner(video, onScan) {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error(window.isSecureContext
-      ? 'This browser cannot use the camera. Use a handheld scanner instead.'
-      : 'The camera only works when the portal is opened over HTTPS (or on localhost). Use a handheld scanner instead.');
-  }
+  // Browsers only expose the camera in a secure context (https:// or http://localhost); the caller
+  // checks window.isSecureContext first to offer an HTTPS link.
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot use the camera. Use a handheld scanner instead.');
 
   let stream;
   try {
-    const decode = await createDecoder();
+    // Ask for the camera first, straight from the button click, then load the decoder.
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    const decode = await createDecoder();
     video.srcObject = stream;
     await video.play();
 
@@ -91,6 +120,6 @@ export async function startScanner(video, onScan) {
     };
   } catch (err) {
     for (const track of stream?.getTracks() ?? []) track.stop();
-    throw new Error(cameraError(err));
+    throw new Error(cameraErrorMessage(err, err?.name === 'NotAllowedError' ? await cameraPermission() : null));
   }
 }

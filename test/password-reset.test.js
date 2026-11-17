@@ -2,9 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MINUTE_MS } from '../src/config.js';
 import { openDb } from '../src/db.js';
-import {
-  confirmPasswordReset, createAccount, login, register, requestPasswordReset, userForToken,
-} from '../src/services/auth.js';
+import { createAccount, login, register, userForToken } from '../src/services/auth.js';
+import { confirmPasswordReset, requestPasswordReset } from '../src/services/password-reset.js';
 
 const T0 = Date.UTC(2030, 0, 1, 10);
 const OLD = 'old-password';

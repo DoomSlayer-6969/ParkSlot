@@ -21,6 +21,11 @@ case "${1:-}" in
   up)
     stop_all
     rm -rf "$RUN_DIR" && mkdir -p "$RUN_DIR/ffprofile" "$RUN_DIR/shots"
+    if [ "${FAKE_CAMERA:-}" = 1 ]; then
+      # A synthetic camera and no permission prompt, so getUserMedia works headless (the admin scanner).
+      printf '%s\n' 'user_pref("media.navigator.streams.fake", true);' \
+        'user_pref("media.navigator.permission.disabled", true);' > "$RUN_DIR/ffprofile/user.js"
+    fi
     # A fresh DB auto-seeds 12 spots, the demo driver and the demo admin.
     DB_FILE="$RUN_DIR/parking.db" PORT="$PORT" nohup node src/server.js > "$RUN_DIR/server.log" 2>&1 &
     # about:blank: otherwise the first tab loads the distro's start page, whose console errors
