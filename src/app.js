@@ -67,7 +67,7 @@ export function createApp({ db, gateway, mailer = createConsoleMailer(), clock =
   });
 
   // --- Driver auth ---
-  app.post('/api/auth/register', (req, res) => res.status(201).json(register(db, req.body ?? {}, clock())));
+  app.post('/api/auth/register', (req, res) => res.status(201).json(register(db, req.body ?? {}, clock(), mailer)));
   app.post('/api/auth/login', (req, res) => res.json(login(db, req.body ?? {}, clock(), 'user')));
   app.post('/api/auth/logout', requireUser, (req, res) => {
     logout(db, req.token);

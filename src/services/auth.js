@@ -2,6 +2,8 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 import { config, DAY_MS, MINUTE_MS } from '../config.js';
 import { transaction } from '../db.js';
 import { HttpError } from '../errors.js';
+import { passwordResetEmail, welcomeEmail } from './emails.js';
+import { sendInBackground } from './mailer.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN_PASSWORD_LENGTH = 8;
@@ -55,10 +57,15 @@ export function createAccount(db, { name, email, password, role = 'user' }, now)
   return { id: Number(lastInsertRowid), name, email, role };
 }
 
-/** Public sign-up. Always creates a driver account; admins are created from the CLI. */
-export function register(db, { name, email, password }, now) {
+/**
+ * Public sign-up. Always creates a driver account; admins are created from the CLI.
+ * With a `mailer`, a welcome email goes out once the account exists. Sign-up never waits for it or fails because of it.
+ */
+export function register(db, { name, email, password }, now, mailer = null) {
   const user = createAccount(db, { name, email, password, role: 'user' }, now);
-  return { token: createSession(db, user.id, now), user };
+  const session = { token: createSession(db, user.id, now), user };
+  if (mailer) sendInBackground(mailer, welcomeEmail(user));
+  return session;
 }
 
 /** Signs in to the portal for `role`. Accounts of the other role are turned away. */
@@ -125,29 +132,7 @@ export function requestPasswordReset(db, mailer, { email }, now) {
   });
   if (!issued) return;
 
-  const { token, name } = issued;
-  // The token goes in the URL fragment, which browsers never send to servers or in Referer headers.
-  const link = `${config.publicUrl}/#reset=${token}`;
-  const message = {
-    to: email,
-    subject: 'Reset your ParkSlot password',
-    text: [
-      `Hi ${name},`,
-      '',
-      'Someone (hopefully you) asked to reset the password for your ParkSlot account.',
-      `Choose a new password with this link. It works once and expires in ${config.resetTokenMinutes} minutes:`,
-      '',
-      link,
-      '',
-      "If you didn't ask for this, you can ignore this email. Your password has not changed.",
-    ].join('\n'),
-  };
-  const logFailure = (err) => console.error(`Could not send password reset email to ${email}:`, err);
-  try {
-    Promise.resolve(mailer.send(message)).catch(logFailure);
-  } catch (err) {
-    logFailure(err);
-  }
+  sendInBackground(mailer, passwordResetEmail({ name: issued.name, email }, issued.token));
 }
 
 /**

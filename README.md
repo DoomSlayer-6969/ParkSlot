@@ -40,7 +40,8 @@ npm run create-admin -- --name "Asha Rao" --email asha@example.com --password 'a
 | Unique booking ID, arrive any time in the window | On successful payment the booking gets a random code such as `PK-7F3K-9QX2` (unique in the DB; letters/digits that look alike are left out). Admin check-in accepts it any time in `[start, end)`, once. |
 | Online payment only | No cash or pay-later path exists. A booking is only confirmed, and only gets its ID, after an online charge succeeds. |
 | Separate admin and user portals | Every account has a role, `user` (driver) or `admin`. Drivers sign in at `/` through `/api/auth/*`; admins sign in at `/admin/` through `/api/admin/auth/*`. Each login endpoint turns away the other role, and every protected endpoint checks the session's role, so a driver session gets `403` from `/api/admin/*` and an admin session gets `403` from the driver booking API. The two portals keep their sessions under different browser storage keys. |
-| Password reset | **Log in → Forgot password?** emails a reset link (`/#reset=<token>`). The link works once, expires after 30 minutes, signs the driver in, and signs out every other session. The request endpoint gives the same answer whether or not an account exists, sends at most one email per account per minute, and ignores admin accounts. Only a SHA-256 hash of each token is stored. In this prototype the email is printed in the server console. |
+| Welcome email | Signing up sends the new driver a welcome email: how to book, where to find their bookings, and what to do if they didn't create the account. It is sent in the background, so a slow or failing mail server never delays or breaks sign-up (failures are logged). |
+| Password reset | **Log in → Forgot password?** emails a reset link (`/#reset=<token>`). The link works once, expires after 30 minutes, signs the driver in, and signs out every other session. The request endpoint gives the same answer whether or not an account exists, sends at most one email per account per minute, and ignores admin accounts. Only a SHA-256 hash of each token is stored. |
 | Booking history | `GET /api/bookings?scope=history` pages through a driver's past paid bookings (completed, not used, or cancelled and refunded), newest first. `scope=upcoming` lists holds and bookings that have not ended. `GET /api/bookings/:id` returns one booking with every payment attempt and refund. The app shows these under **My bookings → Upcoming / History → Details**. |
 
 ## Booking lifecycle
@@ -74,7 +75,8 @@ src/
     bookings.js          hold → pay → confirm, cancel/refund, check-in, booking lists/history
     spots.js             nearby search, spot detail
     payments.js          mock payment gateway (charge/refund)
-    mailer.js            console mailer (prints emails, e.g. reset links)
+    mailer.js            SMTP mailer (nodemailer) or console mailer, chosen from env
+    emails.js            email templates: welcome, password reset
     auth.js              accounts and roles, scrypt password hashing, sessions
 public/                  static frontend (vanilla JS + Leaflet, no build step)
   index.html, app.js     driver app
@@ -83,6 +85,7 @@ public/                  static frontend (vanilla JS + Leaflet, no build step)
 test/
   bookings.test.js       booking rules, history and admin search (service level)
   password-reset.test.js reset links: expiry, single use, throttling, session sign-out
+  email.test.js          welcome email, SMTP delivery against a fake SMTP server, mailer failures
   portals.test.js        portal separation and API flows over HTTP
 ```
 
@@ -118,6 +121,17 @@ Booking lists return `{ bookings, has_more, next_offset }`. `limit` defaults to 
 |---|---|
 | `PORT` | `3000` |
 | `PUBLIC_URL` | `http://localhost:$PORT` (base URL for links in emails) |
+| `SMTP_HOST` | unset: emails are printed to the console instead of sent |
+| `SMTP_PORT` | `587` |
+| `SMTP_SECURE` | `true` when `SMTP_PORT` is 465, otherwise `false` (STARTTLS is used when the server offers it) |
+| `SMTP_USER`, `SMTP_PASS` | unset: no SMTP login |
+| `MAIL_FROM` | required when `SMTP_HOST` is set, e.g. `ParkSlot <no-reply@example.com>` |
+
+`npm start` and `npm run dev` load a `.env` file if there is one (gitignored). `.env.example` lists the settings.
+
+### Sending real email
+
+Set `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM` for any SMTP provider (Amazon SES, Postmark, Mailgun, SendGrid, Gmail with an app password, …) and set `PUBLIC_URL` to the site's real address. At start-up the server says which mode it is in, and warns if it cannot reach or log in to the SMTP server. If `MAIL_FROM` is missing, the server refuses to start.
 | `DB_FILE` | `data/parking.db` |
 | `CURRENCY` | `INR` |
 | `DEFAULT_LAT`, `DEFAULT_LNG` | `28.6315`, `77.2167` (New Delhi) |
@@ -125,7 +139,8 @@ Booking lists return `{ bookings, has_more, next_offset }`. `limit` defaults to 
 ## Prototype limitations / next steps
 
 - **Payments are mocked.** `services/payments.js` has the `charge`/`refund` interface a real adapter (Razorpay, Stripe, …) would implement. In production, card details should go to the provider's hosted checkout and never touch this server (PCI-DSS), and a payment webhook should confirm bookings.
-- **Emails are printed, not sent.** `services/mailer.js` has the `send` interface a real provider adapter (SMTP, SES, …) would implement. Set `PUBLIC_URL` so reset links point at the deployed site.
+- **Emails are sent once, in the background.** A failed send is logged but not retried. A production setup would put emails on a queue with retries, or use a provider's HTTP API with delivery webhooks.
+- **Email addresses are not verified.** Anyone can sign up with any address. The welcome email tells the owner how to take the account over, but sign-up does not require confirming the address.
 - **Admins cannot reset their own password.** Reset is for driver accounts only; admin accounts are managed from the CLI.
 - **Parking data is seeded.** Real spots could come from operator onboarding or OpenStreetMap (`amenity=parking` via the Overpass API). Slot occupancy could come from gate sensors or ANPR cameras.
 - **Admins are not tied to spots.** Any admin can check in any booking and see every booking. Linking admins to the spots they staff would stop a code being checked in at the wrong spot.

@@ -2,30 +2,32 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-ParkSlot is a parking slot booking prototype. Drivers find nearby parking, see each slot's status, hold a slot, pay online (mock gateway), and get a booking code that staff check in at the gate. There are two separate portals: the driver app at `/` and the admin portal at `/admin/`. `README.md` has the full API table, the env vars and a booking lifecycle diagram. The requirements came from `Instructions.md`, which is gitignored and may be missing.
+ParkSlot is a parking slot booking prototype. Drivers find nearby parking, see each slot's status, hold a slot, pay online (mock gateway), and get a booking code that staff check in at the gate. There are two separate portals: the driver app at `/` (sign-up with a welcome email, password reset, booking history) and the admin portal at `/admin/` (check-in, searching all bookings). `README.md` has the full API table, the env vars and a booking lifecycle diagram. The requirements came from `Instructions.md`, which is gitignored and may be missing.
 
 ## Commands
 
-Requires Node.js **22.13+**. The DB is the built-in `node:sqlite`, so there are no native deps. The only dependency is Express 5.
+Requires Node.js **22.13+**. The DB is the built-in `node:sqlite`, so there are no native deps. The dependencies are Express 5 and nodemailer. nodemailer is pinned to an exact version on purpose, so keep it pinned and upgrade only to releases that are a few weeks old. `npm start` and `npm run dev` load `.env` if it exists (see `.env.example`). Running `node src/server.js` directly does not load it.
 
 ```bash
 npm install
 npm start                      # http://localhost:3000, auto-seeds an empty DB
-npm run dev                    # node --watch
+npm run dev                    # node --watch: restarts on every save in src/
 npm test                       # node --test (runs test/*.test.js)
 node --test --test-name-pattern="expired hold" test/bookings.test.js   # a single test
 npm run seed -- --lat 12.97 --lng 77.59 --reset   # reseed demo data at another location
 npm run create-admin -- --name "A" --email a@x.com --password 'longpass'   # sign-up never creates admins
 ```
 
-The demo driver is `demo@parking.test` / `demo1234`, and the demo admin is `admin@parking.test` / `admin1234`. The demo admin is created on start-up whenever no admin exists. The test card `4242 4242 4242 4242` succeeds and `4000 0000 0000 0002` is declined. The SQLite file is `data/parking.db` (gitignored). Delete it to start fresh.
+The demo driver is `demo@parking.test` / `demo1234`, and the demo admin is `admin@parking.test` / `admin1234`. The demo admin is created on start-up whenever no admin exists. The test card `4242 4242 4242 4242` succeeds and `4000 0000 0000 0002` is declined. The SQLite file is `data/parking.db` (gitignored). Delete it to start fresh. A running `npm run dev` re-runs `migrate()` and the demo-admin check against this file each time it restarts, so schema changes reach the local DB as soon as they are saved. To try changes on a throwaway DB, run with `DB_FILE=/some/tmp/path.db PORT=…`.
+
+Without `SMTP_HOST`, emails (welcome, password reset) are printed to the server console. That is the way to get a reset link locally.
 
 There is no linter, formatter or frontend build step.
 
 ## Architecture
 
 - ESM throughout (`"type": "module"`).
-- `src/app.js` exports `createApp({ db, gateway, clock })`. Its dependencies are injected, so tests build the services against `openDb(':memory:')`, `createMockGateway()` and a fake clock. Routes stay thin: they parse numbers with `number()` and call service functions in `src/services/`.
+- `src/app.js` exports `createApp({ db, gateway, mailer, clock })`. Its dependencies are injected, so tests build the services against `openDb(':memory:')`, `createMockGateway()`, a fake mailer and a fake clock. `src/server.js` is the only place real ones are built. Routes stay thin: they parse numbers with `number()` and call service functions in `src/services/`.
 - **Services take `db` and `now` (or `clock`) explicitly.** They never call `Date.now()` themselves. Sync functions receive `now`. Async ones (`payForBooking`, `cancelBooking`) receive the `clock` function, because time moves on while they await the gateway. Keep to this so that tests can control time.
 - **Two portals, separated by role.** `users.role` is `user` (driver) or `admin`. `requireRole(role)` in `app.js` sends `401` when there is no session and `403` when the session belongs to the other role. Driver routes live under `/api/*` and admin routes on the `/api/admin` router. `login(db, creds, now, role)` refuses accounts of the other role, so each portal has its own login endpoint. The frontends store their tokens under different keys (`token` and `adminToken`). New admin-only features go on the admin router and in `public/admin/`.
 - Schema changes: `SCHEMA` in `db.js` is `CREATE TABLE IF NOT EXISTS`, so a new column also needs a step in `migrate()` to upgrade existing `data/parking.db` files.
@@ -46,14 +48,17 @@ No double booking is enforced in application code, not by a DB constraint:
 
 ### Other pieces
 
-- `payments.js` is a mock gateway with a `charge`/`refund` interface. It stands in for a real provider adapter. `mailer.js` works the same way for email: `createConsoleMailer()` prints messages, and `createApp({ mailer })` takes any object with an async `send({ to, subject, text })`. In tests, pass a fake mailer that pushes to an outbox array.
-- Password reset (`requestPasswordReset` / `confirmPasswordReset` in `auth.js`) is for drivers only. Tokens are stored only as SHA-256 hashes in `password_resets` and travel in the URL fragment (`/#reset=…`), which `app.js` reads and then strips. The request path must not reveal whether an account exists: it sends the same response every time, and the email is sent without awaiting it. A successful reset deletes all of the user's sessions and outstanding tokens.
+- `payments.js` is a mock gateway with a `charge`/`refund` interface. It stands in for a real provider adapter.
+- Email: `createApp({ mailer })` takes any object with an async `send({ to, subject, text })`. `mailer.js` has `createSmtpMailer` (nodemailer) and `createConsoleMailer`, and `createMailerFromConfig` picks SMTP when `SMTP_HOST` is set. Templates live in `emails.js`. Always send through `sendInBackground(mailer, message)`: it never awaits and never throws, so an email can't delay or fail the request that triggered it. In tests, pass a fake mailer that pushes to an outbox array. `test/email.test.js` has a fake SMTP server for checking real delivery. `server.js` builds the mailer before opening the DB: SMTP without `MAIL_FROM` stops start-up, while an unreachable SMTP server only logs a warning (from `verify()`).
+- Sign-up sends a welcome email: `register(db, data, now, mailer)` sends only when it is given a mailer. Admin accounts (`createAccount`) get no email.
+- Password reset (`requestPasswordReset` / `confirmPasswordReset` in `auth.js`) is for drivers only. Tokens are stored only as SHA-256 hashes in `password_resets` and travel in the URL fragment (`/#reset=…`), which `public/app.js` reads and then strips (on load and on `hashchange`). An invalid or expired token returns `400` with `reason: "invalid_reset_token"`, which the UI uses to offer a new link. The request path must not reveal whether an account exists: it sends the same response every time, and the email is sent without awaiting it. A successful reset deletes all of the user's sessions and outstanding tokens.
 - `auth.js` hashes passwords with scrypt. Sessions are opaque tokens in the `sessions` table, sent as `Authorization: Bearer`. `createAccount` is the single place accounts are made: `register` uses it for drivers, and the seed and `create-admin` CLI use it for admins.
-- `seed.js` uses a fixed-seed PRNG, so the demo layout is deterministic. It works both as a module (`seedDemoData`, `hasSpots`) and as a CLI.
-- `public/` is the vanilla-JS frontend served statically by Express: the driver app (`index.html`/`app.js`), the admin portal (`admin/`), and shared helpers in `common.js` (`request`, `esc`, `money`, `paymentList`, guarded `storage`). `/attendant.html` redirects to `/admin/`. Leaflet comes from a CDN, and place search uses OSM Nominatim.
+- `seed.js` uses a fixed-seed PRNG, so the demo layout is deterministic. Seeded bookings get matching `succeeded` payment rows, so receipts look real. It works both as a module (`seedDemoData`, `hasSpots`, `ensureDemoAdmin`) and as a CLI.
+- `public/` is the vanilla-JS frontend served statically by Express: the driver app (`index.html`/`app.js`), the admin portal (`admin/`), and shared helpers in `common.js` (`request`, `esc`, `money`, `paymentList`, guarded `storage`). `/attendant.html` redirects to `/admin/`. Leaflet comes from a CDN, and place search uses OSM Nominatim. Both frontends show and hide views with the `hidden` attribute. A global `[hidden] { display: none !important }` rule in `styles.css` keeps that working on elements that set their own `display`, so don't remove it.
 
 ## Tests
 
 - `test/bookings.test.js` tests the services directly. It uses `node:test` with an in-memory DB, a fixed `T0` and an `advance(ms)` clock. Add a test there for any change to booking rules: overlap, holds, payment races, cancel/refund, check-in windows or history scopes.
 - `test/password-reset.test.js` tests the reset services with a fake mailer and a controllable clock.
-- `test/portals.test.js` starts the real app on a random port and calls it with `fetch`. It covers role and portal separation, the schema migration, and request parsing. Add tests there for route-level or auth behaviour.
+- `test/email.test.js` covers the welcome email, mailer failure handling, mailer selection, and SMTP delivery against a fake SMTP server.
+- `test/portals.test.js` starts the real app on a random port and calls it with `fetch`. It covers role and portal separation, password reset over HTTP, the schema migration, and request parsing. Add tests there for route-level or auth behaviour.

@@ -121,10 +121,11 @@ test('password reset over HTTP: same answer for any email, and the link signs th
   assert.equal(known.status, 202);
   assert.deepEqual([unknown.status, unknown.body], [known.status, known.body]);
   assert.deepEqual([admin.status, admin.body], [known.status, known.body]);
-  assert.equal(outbox.length, 1);
+  const resets = outbox.filter((m) => m.subject === 'Reset your ParkSlot password');
+  assert.equal(resets.length, 1);
   assert.equal((await ask('')).status, 400);
 
-  const resetToken = /#reset=([\w-]+)/.exec(outbox[0].text)[1];
+  const resetToken = /#reset=([\w-]+)/.exec(resets[0].text)[1];
   const confirm = (body) => call('/api/auth/password-reset/confirm', { method: 'POST', body });
   const tooShort = await confirm({ token: resetToken, password: 'short' });
   assert.equal(tooShort.status, 400);
