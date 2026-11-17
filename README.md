@@ -1,6 +1,6 @@
 # ParkSlot: parking slot booking prototype
 
-Find parking near where you're going, see every slot's live status, book a slot for _n_ hours, pay online, and get a booking ID to show on arrival. Drivers use the app at `/`; parking staff use a separate admin portal at `/admin/`. Built from the requirements in [Instructions.md](Instructions.md).
+Find parking near where you're going, see every slot's live status, book a slot for _n_ hours, pay online, and get a QR code pass that staff scan on arrival. Drivers use the app at `/`; parking staff use a separate admin portal at `/admin/`. Built from the requirements in [Instructions.md](Instructions.md).
 
 ## Quick start
 
@@ -37,7 +37,8 @@ npm run create-admin -- --name "Asha Rao" --email asha@example.com --password 'a
 | Every slot's status in a spot | `GET /api/spots/:id?start&hours` returns each slot as **free**, **booked** (paid or mid-checkout), or **occupied** (driver checked in) for the chosen window, plus its upcoming booked times. |
 | Book for _n_ hours, charged hourly | Choose an arrival time (up to 7 days ahead) and 1–24 whole hours. Price = `hourly_rate × hours`. |
 | No double booking | Checking for an overlapping booking and inserting the new one happen in a single `BEGIN IMMEDIATE` SQLite transaction, so two requests cannot both pass the check. See [Booking lifecycle](#booking-lifecycle). |
-| Unique booking ID, arrive any time in the window | On successful payment the booking gets a random code such as `PK-7F3K-9QX2` (unique in the DB; letters/digits that look alike are left out). Admin check-in accepts it any time in `[start, end)`, once. |
+| QR check-in, arrive any time in the window | On successful payment the booking gets a **QR pass**: a QR code holding a secret 128-bit check-in token (`PARKSLOT:<32 hex chars>`), shown to the driver after payment and under **My bookings → Show QR code**, with **Save image** for car parks without signal. Staff scan it in the admin portal with the device camera or a handheld USB/Bluetooth scanner. A pass works once, only within `[start, end)`, and only for its own booking. See [Check-in](#check-in). |
+| Booking reference | Each paid booking also gets a reference such as `PK-7F3K-9QX2` (unique; letters/digits that look alike are left out). It is shown on the booking's details and is searchable in the admin portal, for support. It **cannot** check anyone in. |
 | Online payment only | No cash or pay-later path exists. A booking is only confirmed, and only gets its ID, after an online charge succeeds. |
 | Separate admin and user portals | Every account has a role, `user` (driver) or `admin`. Drivers sign in at `/` through `/api/auth/*`; admins sign in at `/admin/` through `/api/admin/auth/*`. Each login endpoint turns away the other role, and every protected endpoint checks the session's role, so a driver session gets `403` from `/api/admin/*` and an admin session gets `403` from the driver booking API. The two portals keep their sessions under different browser storage keys. |
 | Welcome email | Signing up sends the new driver a welcome email: how to book, where to find their bookings, and what to do if they didn't create the account. It is sent in the background, so a slow or failing mail server never delays or breaks sign-up (failures are logged). |
@@ -49,7 +50,7 @@ npm run create-admin -- --name "Asha Rao" --email asha@example.com --password 'a
 ```
             createHold                     pay (charge ok)              check-in at gate
   (free) ─────────────► pending_payment ─────────────────► confirmed ─────────────────► checked_in
-                         │  holds slot 10 min               │ has booking ID              │ slot "occupied"
+                         │  holds slot 10 min               │ has QR pass + reference     │ slot "occupied"
                          │                                  │                             │
                          ├─ hold lapses ─► expired          ├─ cancel before start ─►     └─ window ends ─► completed
                          └─ user cancels ─► cancelled       │  cancelled + refund
@@ -59,6 +60,17 @@ npm run create-admin -- --name "Asha Rao" --email asha@example.com --password 'a
 - **Holds.** Clicking "Continue to payment" reserves the slot for 10 minutes, so nobody else can take it while the user types card details.
 - **Slow-payment race.** If a hold runs out while the gateway is still processing, and someone else books the slot in that gap, the late payment is detected when it tries to confirm and is **refunded automatically**. A duplicate "pay" click is handled the same way. `test/bookings.test.js` covers this.
 - `expired`, `lapsed` and `completed` depend only on the clock, so they are worked out when bookings are read, not stored.
+
+## Check-in
+
+1. After paying, the driver sees their **QR pass** (`GET /api/bookings/:id/qr`, an SVG served with `Cache-Control: no-store`). It stays available under **My bookings** until it is used or the booking ends, and **Save image** downloads it as a PNG with the booking details.
+2. At the gate, staff open **Check-in** in the admin portal and either press **Scan with camera** or scan with a handheld scanner into the text box (these scanners type the QR's text followed by Enter). The camera scanner uses the browser's `BarcodeDetector` where it exists, and otherwise [jsQR](https://github.com/cozmo/jsQR), served by the app at `/vendor/jsQR.js`.
+3. The server finds the booking by its token and checks it in if it is paid, not used and inside its window. A pass held in front of the camera is only sent once.
+4. **No QR code?** (dead phone, no signal): staff find the booking under **Bookings** (by driver name, email or reference), check the driver's ID, and press **Check in manually** in its details. The same window rules apply.
+
+Every check-in records how it happened (`qr` or `manual`) and which admin did it, shown in the booking's details.
+
+The camera needs a secure context: it works on `http://localhost` and over HTTPS, but not over plain HTTP on another address. Handheld scanners work anywhere.
 
 ## Project layout
 
@@ -72,7 +84,10 @@ src/
   create-admin.js        CLI: npm run create-admin
   services/
     availability.js      window validation, overlap/conflict checks, slot statuses
-    bookings.js          hold → pay → confirm, cancel/refund, check-in, booking lists/history
+    bookings.js          hold → pay → confirm, cancel/refund, booking lists/history
+    booking-records.js   booking SELECTs, derived statuses, loaders (shared by bookings and check-in)
+    checkin.js           QR pass payload, check-in by scanned pass or manually
+    passes.js            pass tokens, payload format, QR code SVG rendering
     spots.js             nearby search, spot detail
     payments.js          mock payment gateway (charge/refund)
     mailer.js            SMTP mailer (nodemailer) or console mailer, chosen from env
@@ -80,13 +95,14 @@ src/
     auth.js              accounts and roles, scrypt password hashing, sessions
 public/                  static frontend (vanilla JS + Leaflet, no build step)
   index.html, app.js     driver app
-  admin/                 admin portal: check-in and all bookings
+  admin/                 admin portal: QR check-in (scanner.js: camera) and all bookings
   common.js, styles.css  shared by both
 test/
   bookings.test.js       booking rules, history and admin search (service level)
   password-reset.test.js reset links: expiry, single use, throttling, session sign-out
   email.test.js          welcome email, SMTP delivery against a fake SMTP server, mailer failures
-  portals.test.js        portal separation and API flows over HTTP
+  portals.test.js        portal separation, QR check-in and API flows over HTTP, schema migrations
+  support/qr.js          decodes the served QR SVGs the way a scanner would (test helper)
 ```
 
 ## API
@@ -107,11 +123,13 @@ test/
 | POST | `/api/bookings/:id/cancel` | Driver | release a hold, or cancel and refund before start |
 | GET | `/api/bookings?scope=&limit=&offset=` | Driver | my bookings: `scope` is `all` (default), `upcoming` or `history` |
 | GET | `/api/bookings/:id` | Driver | one of my bookings with its `payments` |
+| GET | `/api/bookings/:id/qr` | Driver | the booking's QR pass as `image/svg+xml`; `409` once it is used, cancelled or over |
 | POST | `/api/admin/auth/login` | – | admin sign-in, returns `{ token, user }` |
 | GET | `/api/admin/auth/me` · POST `/api/admin/auth/logout` | Admin | session |
-| POST | `/api/admin/checkin` `{ code }` | Admin | validate the code at arrival |
-| GET | `/api/admin/bookings?q=&scope=&limit=&offset=` | Admin | all bookings; `q` matches code, driver name or email |
-| GET | `/api/admin/bookings/:id` | Admin | any booking with driver details and `payments` |
+| POST | `/api/admin/checkin` `{ qr }` | Admin | check in the booking whose QR pass was scanned (`qr` is the scanned text); a booking reference gives `400` with `reason: "not_a_pass"` |
+| GET | `/api/admin/bookings?q=&scope=&limit=&offset=` | Admin | all bookings; `q` matches reference, driver name or email |
+| GET | `/api/admin/bookings/:id` | Admin | any booking with driver details, `payments`, and how and by whom it was checked in |
+| POST | `/api/admin/bookings/:id/checkin` | Admin | manual check-in for a driver who cannot show their QR code |
 
 Booking lists return `{ bookings, has_more, next_offset }`. `limit` defaults to 20 (max 100). Times are epoch milliseconds. Amounts are in the currency's smallest unit (e.g. paise).
 
@@ -143,6 +161,8 @@ Set `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM` for any SMTP provider 
 - **Email addresses are not verified.** Anyone can sign up with any address. The welcome email tells the owner how to take the account over, but sign-up does not require confirming the address.
 - **Admins cannot reset their own password.** Reset is for driver accounts only; admin accounts are managed from the CLI.
 - **Parking data is seeded.** Real spots could come from operator onboarding or OpenStreetMap (`amenity=parking` via the Overpass API). Slot occupancy could come from gate sensors or ANPR cameras.
-- **Admins are not tied to spots.** Any admin can check in any booking and see every booking. Linking admins to the spots they staff would stop a code being checked in at the wrong spot.
+- **Admins are not tied to spots.** Any admin can check in any booking and see every booking. Linking admins to the spots they staff would stop a pass being checked in at the wrong spot.
+- **QR passes are static.** A screenshot of a pass works as well as the app, so a driver could pass it on. It still works only once and only within its window. A rotating, time-based QR would stop sharing but needs the app open and online at the gate.
+- **No booking confirmation email.** The pass lives in the app (and as a saved image). Emailing it would help drivers who lose access to their account.
 - **The demo admin has a published password.** Outside a demo, create a real admin with `npm run create-admin` and delete the demo account.
 - **Only one server process should write.** SQLite with `BEGIN IMMEDIATE` is safe for this. To scale out, move to Postgres and use an exclusion constraint on `(slot_id, tstzrange(start_at, end_at))` to enforce no-overlap in the database itself.

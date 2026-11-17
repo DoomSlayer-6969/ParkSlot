@@ -31,18 +31,33 @@
       </div>
 
       <div id="checkin-panel" class="narrow-left">
-        <form id="checkin-form" class="form card">
+        <section class="card">
           <h1>Check a driver in</h1>
-          <p class="muted small">Enter the booking ID the driver shows on arrival.</p>
-          <label>Booking ID <input name="code" required placeholder="PK-XXXX-XXXX" autocomplete="off" class="code-input"></label>
-          <div class="actions"><button class="btn primary">Check in</button></div>
-        </form>
+          <p class="muted small">Scan the QR code the driver shows in the ParkSlot app.</p>
+          <div class="scanner-view" id="scanner-view" hidden>
+            <video id="scanner-video" playsinline muted></video>
+            <div class="scanner-frame" aria-hidden="true"></div>
+          </div>
+          <p class="small" id="scanner-status" aria-live="polite"></p>
+          <div class="actions start"><button type="button" class="btn primary" id="camera-btn">Scan with camera</button></div>
+
+          <form id="checkin-form" class="form scan-form">
+            <label>Handheld scanner
+              <span class="scan-row">
+                <input name="qr" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Click here, then scan the QR code">
+                <button class="btn ghost">Check in</button>
+              </span>
+            </label>
+          </form>
+        </section>
         <div id="checkin-result" aria-live="polite"></div>
+        <p class="muted small">No QR code? Find the booking under <a href="#" data-panel-link="bookings">Bookings</a>,
+          check the driver's ID, and check it in manually from its details.</p>
       </div>
 
       <div id="bookings-panel" hidden>
         <form id="booking-search" class="filters">
-          <input name="q" type="search" placeholder="Booking ID, driver name or email" aria-label="Search bookings">
+          <input name="q" type="search" placeholder="Reference, driver name or email" aria-label="Search bookings">
           <select name="scope" aria-label="Which bookings">
             <option value="all">All bookings</option>
             <option value="upcoming">Upcoming &amp; active</option>
@@ -53,7 +68,7 @@
         <div class="table-wrap">
           <table class="bookings-table">
             <thead>
-              <tr><th>Booking</th><th>Driver</th><th>Spot · slot</th><th>Window</th><th>Amount</th><th>Status</th></tr>
+              <tr><th>Reference</th><th>Driver</th><th>Spot · slot</th><th>Window</th><th>Amount</th><th>Status</th></tr>
             </thead>
             <tbody id="bookings-body"></tbody>
           </table>

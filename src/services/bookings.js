@@ -3,22 +3,13 @@ import { config, MINUTE_MS } from '../config.js';
 import { transaction } from '../db.js';
 import { HttpError } from '../errors.js';
 import { findConflict, resolveWindow } from './availability.js';
+import {
+  ADMIN_BOOKING_SELECT, BOOKING_SELECT, loadAdminBooking, loadBooking, loadOwnBooking, present,
+} from './booking-records.js';
+import { newPassToken } from './passes.js';
 
-// No 0/O, 1/I/L so the code is easy to read out at the gate.
+// Booking references: no 0/O, 1/I/L so they are easy to read out to support.
 const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
-
-const BOOKING_COLUMNS = `
-  b.id, b.code, b.user_id, b.slot_id, b.start_at, b.end_at, b.hours, b.amount, b.status,
-  b.hold_expires_at, b.checked_in_at, b.created_at,
-  s.label AS slot_label, p.id AS spot_id, p.name AS spot_name, p.address AS spot_address`;
-const BOOKING_FROM = `
-  FROM bookings b
-  JOIN slots s ON s.id = b.slot_id
-  JOIN parking_spots p ON p.id = s.spot_id`;
-const BOOKING_SELECT = `SELECT ${BOOKING_COLUMNS} ${BOOKING_FROM}`;
-// Admins also see who made the booking.
-const ADMIN_BOOKING_SELECT = `SELECT ${BOOKING_COLUMNS}, u.name AS user_name, u.email AS user_email
-  ${BOOKING_FROM} JOIN users u ON u.id = b.user_id`;
 
 // Listing filters, written against the *stored* status since effective statuses are derived.
 //   upcoming - holds still running, and paid bookings whose window has not ended (incl. parked now)
@@ -49,24 +40,6 @@ function generateCode(db) {
   }
 }
 
-// Statuses that follow from the clock are derived on read rather than stored.
-function effectiveStatus(b, now) {
-  if (b.status === 'pending_payment' && b.hold_expires_at <= now) return 'expired';
-  if (b.status === 'confirmed' && b.end_at <= now) return 'lapsed';
-  if (b.status === 'checked_in' && b.end_at <= now) return 'completed';
-  return b.status;
-}
-
-function present(b, now) {
-  return { ...b, status: effectiveStatus(b, now) };
-}
-
-function loadOwnBooking(db, bookingId, userId) {
-  const booking = db.prepare(`${BOOKING_SELECT} WHERE b.id = ?`).get(bookingId);
-  if (!booking || booking.user_id !== userId) throw new HttpError(404, 'Booking not found');
-  return booking;
-}
-
 function recordPayment(db, bookingId, amount, status, ref, last4, now) {
   db.prepare(`
     INSERT INTO payments (booking_id, amount, status, provider_ref, card_last4, created_at)
@@ -93,11 +66,14 @@ export function createHold(db, { userId, slotId, startAt, hours }, now) {
       slot.id, userId, window.startAt, window.endAt, window.hours,
       slot.hourly_rate * window.hours, now + config.holdMinutes * MINUTE_MS, now,
     );
-    return present(db.prepare(`${BOOKING_SELECT} WHERE b.id = ?`).get(Number(lastInsertRowid)), now);
+    return present(loadBooking(db, Number(lastInsertRowid)), now);
   });
 }
 
-/** Step 2: charge the card online and, on success, confirm the booking and issue its code. */
+/**
+ * Step 2: charge the card online and, on success, confirm the booking. That issues its reference code
+ * and the secret check-in token behind the driver's QR pass (see checkin.js).
+ */
 export async function payForBooking(db, gateway, { bookingId, userId, card }, clock) {
   const booking = loadOwnBooking(db, bookingId, userId);
   if (booking.status !== 'pending_payment') throw new HttpError(409, 'This booking is not awaiting payment');
@@ -121,8 +97,9 @@ export async function payForBooking(db, gateway, { bookingId, userId, card }, cl
     if (findConflict(db, booking.slot_id, booking.start_at, booking.end_at, now, booking.id)) return false;
 
     recordPayment(db, booking.id, booking.amount, 'succeeded', charge.ref, charge.last4, now);
-    db.prepare("UPDATE bookings SET status = 'confirmed', code = ?, hold_expires_at = NULL WHERE id = ?")
-      .run(generateCode(db), booking.id);
+    db.prepare(`
+      UPDATE bookings SET status = 'confirmed', code = ?, checkin_token = ?, hold_expires_at = NULL WHERE id = ?
+    `).run(generateCode(db), newPassToken(), booking.id);
     return true;
   });
 
@@ -131,7 +108,7 @@ export async function payForBooking(db, gateway, { bookingId, userId, card }, cl
     recordPayment(db, booking.id, booking.amount, 'refunded', refund.ref, charge.last4, clock());
     throw new HttpError(409, 'This booking could not be confirmed (the slot was taken or it was already paid). Your payment has been refunded.');
   }
-  return present(db.prepare(`${BOOKING_SELECT} WHERE b.id = ?`).get(booking.id), now);
+  return present(loadBooking(db, booking.id), now);
 }
 
 /** Releases an unpaid hold, or cancels a paid booking with a refund if it has not started yet. */
@@ -153,23 +130,7 @@ export async function cancelBooking(db, gateway, { bookingId, userId }, clock) {
   } else {
     throw new HttpError(409, 'Only unpaid bookings, or paid bookings that have not started, can be cancelled');
   }
-  return present(db.prepare(`${BOOKING_SELECT} WHERE b.id = ?`).get(booking.id), clock());
-}
-
-/** Attendant-side: validate the code the driver shows on arrival and mark the slot occupied. */
-export function checkIn(db, code, now) {
-  const booking = db.prepare(`${BOOKING_SELECT} WHERE b.code = ?`).get(String(code ?? '').trim().toUpperCase());
-  if (!booking) throw new HttpError(404, 'No booking found with this ID');
-
-  const view = present(booking, now);
-  if (booking.status === 'checked_in') throw new HttpError(409, 'This booking has already been checked in', { booking: view });
-  if (booking.status !== 'confirmed') throw new HttpError(409, 'This booking is not active', { booking: view });
-  if (now < booking.start_at) throw new HttpError(400, 'This booking has not started yet', { booking: view });
-  if (now >= booking.end_at) throw new HttpError(410, 'This booking has already ended', { booking: view });
-
-  db.prepare("UPDATE bookings SET status = 'checked_in', checked_in_at = ? WHERE id = ? AND status = 'confirmed'")
-    .run(now, booking.id);
-  return present(db.prepare(`${BOOKING_SELECT} WHERE b.id = ?`).get(booking.id), now);
+  return present(loadBooking(db, booking.id), clock());
 }
 
 function readPage(limit, offset) {
@@ -208,7 +169,7 @@ export function listUserBookings(db, userId, now, { scope = 'all', limit = confi
     { scope, limit, offset }, now);
 }
 
-/** Admin view of every booking. `q` matches part of the booking code, or the driver's name or email. */
+/** Admin view of every booking. `q` matches part of the booking reference, or the driver's name or email. */
 export function listAllBookings(db, now, { q, scope = 'all', limit = config.pageSize, offset = 0 } = {}) {
   const term = String(q ?? '').trim();
   const filter = term
@@ -235,7 +196,5 @@ export function getUserBooking(db, { bookingId, userId }, now) {
 
 /** Any booking, with the driver's details and payment history. */
 export function getBookingForAdmin(db, bookingId, now) {
-  const booking = db.prepare(`${ADMIN_BOOKING_SELECT} WHERE b.id = ?`).get(bookingId);
-  if (!booking) throw new HttpError(404, 'Booking not found');
-  return withPayments(db, booking, now);
+  return withPayments(db, loadAdminBooking(db, bookingId), now);
 }

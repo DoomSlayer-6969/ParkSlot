@@ -2,17 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-ParkSlot is a parking slot booking prototype. Drivers find nearby parking, see each slot's status, hold a slot, pay online (mock gateway), and get a booking code that staff check in at the gate. There are two separate portals: the driver app at `/` (sign-up with a welcome email, password reset, booking history) and the admin portal at `/admin/` (check-in, searching all bookings). `README.md` has the full API table, the env vars and a booking lifecycle diagram. The requirements came from `Instructions.md`, which is gitignored and may be missing.
+ParkSlot is a parking slot booking prototype. Drivers find nearby parking, see each slot's status, hold a slot, pay online (mock gateway), and get a QR code pass that staff scan at the gate. There are two separate portals: the driver app at `/` (sign-up with a welcome email, password reset, booking history) and the admin portal at `/admin/` (check-in, searching all bookings). `README.md` has the full API table, the env vars and a booking lifecycle diagram. The requirements came from `Instructions.md`, which is gitignored and may be missing.
 
 ## Commands
 
-Requires Node.js **22.13+**. The DB is the built-in `node:sqlite`, so there are no native deps. The dependencies are Express 5 and nodemailer. nodemailer is pinned to an exact version on purpose, so keep it pinned and upgrade only to releases that are a few weeks old. `npm start` and `npm run dev` load `.env` if it exists (see `.env.example`). Running `node src/server.js` directly does not load it.
+Requires Node.js **22.13+**. The DB is the built-in `node:sqlite`, so there are no native deps. The dependencies are Express 5, nodemailer, `uqr` (QR code generation) and `jsqr` (QR decoding, served to the admin portal at `/vendor/jsQR.js`). nodemailer, uqr and jsqr are pinned to exact versions on purpose, so keep them pinned and upgrade only to releases that are a few weeks old. `npm start` and `npm run dev` load `.env` if it exists (see `.env.example`). Running `node src/server.js` directly does not load it.
 
 ```bash
 npm install
 npm start                      # http://localhost:3000, auto-seeds an empty DB
 npm run dev                    # node --watch: restarts on every save in src/
-npm test                       # node --test (runs test/*.test.js)
+npm test                       # node --test test/*.test.js (test/support/ holds helpers, not tests)
 node --test --test-name-pattern="expired hold" test/bookings.test.js   # a single test
 npm run seed -- --lat 12.97 --lng 77.59 --reset   # reseed demo data at another location
 npm run create-admin -- --name "A" --email a@x.com --password 'longpass'   # sign-up never creates admins
@@ -41,10 +41,18 @@ No double booking is enforced in application code, not by a DB constraint:
 - `availability.js` holds the `BLOCKING` SQL predicate: a booking blocks its slot when it is `confirmed`/`checked_in`, or `pending_payment` with an unexpired `hold_expires_at`. `findConflict` and `slotsWithStatus` both use it. If you change what blocks a slot, change it there.
 - Every check-then-write must run inside `transaction(db, fn)` from `db.js`, which uses `BEGIN IMMEDIATE` to take the write lock up front. `fn` must be synchronous. Never `await` inside a transaction.
 - `payForBooking` charges the gateway *outside* the transaction. It then re-checks the status and conflicts inside a new transaction. If the hold lapsed and someone else took the slot, or a duplicate pay already confirmed it, the charge is refunded automatically.
-- Stored statuses are only `pending_payment | confirmed | checked_in | cancelled`. `expired`, `lapsed` and `completed` follow from the clock and are derived on read by `effectiveStatus()` in `bookings.js`. Never write them to the DB.
-- A booking code (`PK-XXXX-XXXX`) is issued only after a successful payment.
+- Stored statuses are only `pending_payment | confirmed | checked_in | cancelled`. `expired`, `lapsed` and `completed` follow from the clock and are derived on read by `effectiveStatus()` in `booking-records.js`. Never write them to the DB.
+- A booking reference (`code`, `PK-XXXX-XXXX`) and a check-in token (`checkin_token`) are issued together, only after a successful payment. `code IS NOT NULL` means "paid".
 - Booking lists (`listUserBookings`, `listAllBookings`) go through `pageOfBookings` with a scope from `SCOPES` (`all` / `upcoming` / `history`). Because effective statuses are derived, each scope's SQL is written against stored status plus `$now`. `history` means paid (`code IS NOT NULL`) and over, so abandoned holds are excluded. Lists return `{ bookings, has_more, next_offset }`.
 - node:sqlite throws on unknown named parameters, so only bind `$now` etc. when the SQL uses them.
+
+### QR check-in
+
+- The driver's QR pass encodes `PARKSLOT:` + `checkin_token` (128 random bits, uppercase hex, so the payload is QR-alphanumeric and case-insensitive for handheld scanners with Caps Lock on). `passes.js` owns the token, payload format and SVG rendering. `checkin.js` owns the rules.
+- The token is a credential. It is not in `BOOKING_COLUMNS` (`booking-records.js`), so it never appears in booking JSON or admin views. It only leaves the server as the SVG from `GET /api/bookings/:id/qr`, which is `no-store`. Keep it that way.
+- The reference code cannot check anyone in. `POST /api/admin/checkin { qr }` takes only a scanned pass. The fallback is manual check-in (`POST /api/admin/bookings/:id/checkin`). Both go through `admit()`, inside `transaction()`, and record `checkin_method` (`qr`/`manual`) and `checked_in_by` (the admin).
+- `migrate()` backfills `checkin_token` for paid bookings from before passes existed. The unique index on `checkin_token` lives in `migrate()` rather than `SCHEMA`, because `SCHEMA` runs before the column exists on old DBs.
+- `public/admin/scanner.js` reads the camera with `BarcodeDetector` when it supports `qr_code`, and otherwise loads jsQR. `getUserMedia` needs a secure context (localhost or HTTPS).
 
 ### Other pieces
 
@@ -53,12 +61,12 @@ No double booking is enforced in application code, not by a DB constraint:
 - Sign-up sends a welcome email: `register(db, data, now, mailer)` sends only when it is given a mailer. Admin accounts (`createAccount`) get no email.
 - Password reset (`requestPasswordReset` / `confirmPasswordReset` in `auth.js`) is for drivers only. Tokens are stored only as SHA-256 hashes in `password_resets` and travel in the URL fragment (`/#reset=…`), which `public/app.js` reads and then strips (on load and on `hashchange`). An invalid or expired token returns `400` with `reason: "invalid_reset_token"`, which the UI uses to offer a new link. The request path must not reveal whether an account exists: it sends the same response every time, and the email is sent without awaiting it. A successful reset deletes all of the user's sessions and outstanding tokens.
 - `auth.js` hashes passwords with scrypt. Sessions are opaque tokens in the `sessions` table, sent as `Authorization: Bearer`. `createAccount` is the single place accounts are made: `register` uses it for drivers, and the seed and `create-admin` CLI use it for admins.
-- `seed.js` uses a fixed-seed PRNG, so the demo layout is deterministic. Seeded bookings get matching `succeeded` payment rows, so receipts look real. It works both as a module (`seedDemoData`, `hasSpots`, `ensureDemoAdmin`) and as a CLI.
+- `seed.js` uses a fixed-seed PRNG, so the demo layout is deterministic. Seeded bookings get matching `succeeded` payment rows, so receipts look real, and pass tokens from `crypto` (never the PRNG). It works both as a module (`seedDemoData`, `hasSpots`, `ensureDemoAdmin`) and as a CLI.
 - `public/` is the vanilla-JS frontend served statically by Express: the driver app (`index.html`/`app.js`), the admin portal (`admin/`), and shared helpers in `common.js` (`request`, `esc`, `money`, `paymentList`, guarded `storage`). `/attendant.html` redirects to `/admin/`. Leaflet comes from a CDN, and place search uses OSM Nominatim. Both frontends show and hide views with the `hidden` attribute. A global `[hidden] { display: none !important }` rule in `styles.css` keeps that working on elements that set their own `display`, so don't remove it.
 
 ## Tests
 
-- `test/bookings.test.js` tests the services directly. It uses `node:test` with an in-memory DB, a fixed `T0` and an `advance(ms)` clock. Add a test there for any change to booking rules: overlap, holds, payment races, cancel/refund, check-in windows or history scopes.
+- `test/bookings.test.js` tests the services directly, including QR and manual check-in. It uses `node:test` with an in-memory DB, a fixed `T0` and an `advance(ms)` clock. Add a test there for any change to booking rules: overlap, holds, payment races, cancel/refund, check-in windows or history scopes.
 - `test/password-reset.test.js` tests the reset services with a fake mailer and a controllable clock.
 - `test/email.test.js` covers the welcome email, mailer failure handling, mailer selection, and SMTP delivery against a fake SMTP server.
-- `test/portals.test.js` starts the real app on a random port and calls it with `fetch`. It covers role and portal separation, password reset over HTTP, the schema migration, and request parsing. Add tests there for route-level or auth behaviour.
+- `test/portals.test.js` starts the real app on a random port and calls it with `fetch`. It covers role and portal separation, QR check-in end to end (it decodes the served SVG with `test/support/qr.js`), manual check-in, password reset over HTTP, the schema migrations, and request parsing. Add tests there for route-level or auth behaviour.

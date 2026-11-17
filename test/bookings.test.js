@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { HOUR_MS, MINUTE_MS } from '../src/config.js';
 import { openDb } from '../src/db.js';
-import { register } from '../src/services/auth.js';
+import { createAccount, register } from '../src/services/auth.js';
 import {
-  cancelBooking, checkIn, createHold, getUserBooking, listAllBookings, listUserBookings, payForBooking,
+  cancelBooking, createHold, getBookingForAdmin, getUserBooking, listAllBookings, listUserBookings, payForBooking,
 } from '../src/services/bookings.js';
+import { checkInManually, checkInWithPass, getPassPayload } from '../src/services/checkin.js';
 import { createMockGateway, TEST_CARDS } from '../src/services/payments.js';
 import { findNearby, getSpot } from '../src/services/spots.js';
 
@@ -24,8 +25,16 @@ function setup() {
   let now = T0;
   const clock = () => now;
   const user = (name) => register(db, { name, email: `${name}@test.dev`, password: 'password1' }, T0).user.id;
-  return { db, clock, advance: (ms) => { now += ms; }, alice: user('alice'), bob: user('bob'), gateway: createMockGateway() };
+  const staff = createAccount(db, { name: 'Gate Staff', email: 'staff@test.dev', password: 'password1', role: 'admin' }, T0);
+  return {
+    db, clock, advance: (ms) => { now += ms; }, alice: user('alice'), bob: user('bob'), staff: staff.id,
+    gateway: createMockGateway(),
+  };
 }
+
+/** What the gate scanner reads off the driver's QR pass. */
+const passOf = (ctx, booking) => getPassPayload(ctx.db, { bookingId: booking.id, userId: booking.user_id }, ctx.clock());
+const scan = (ctx, scanned) => checkInWithPass(ctx.db, { scanned, staffId: ctx.staff }, ctx.clock());
 
 async function bookAndPay(ctx, userId, { slotId = 1, startAt = T0, hours = 2 } = {}) {
   const hold = createHold(ctx.db, { userId, slotId, startAt, hours }, ctx.clock());
@@ -122,24 +131,93 @@ test('if the slot is taken while a slow payment is in flight, the payer is refun
   assert.equal(confirmed.n, 1);
 });
 
-test('check-in works any time within the booked window, once', async () => {
+// ---------------------------------------------------------------- QR check-in
+
+test('a paid booking gets a QR pass with its own secret token; unpaid holds and other users get none', async () => {
   const ctx = setup();
-  const booking = await bookAndPay(ctx, ctx.alice, { startAt: T0 + HOUR_MS, hours: 2 });
+  const a = await bookAndPay(ctx, ctx.alice, { slotId: 1 });
+  const b = await bookAndPay(ctx, ctx.bob, { slotId: 2 });
+  assert.match(passOf(ctx, a), /^PARKSLOT:[0-9A-F]{32}$/);
+  assert.notEqual(passOf(ctx, a), passOf(ctx, b));
+  assert.equal(passOf(ctx, a), passOf(ctx, a)); // the same pass every time it is shown
+  assert.ok(!passOf(ctx, a).includes(a.code)); // the pass is not derived from the reference
 
-  assert.throws(() => checkIn(ctx.db, booking.code, ctx.clock()), { status: 400 }); // too early
-  ctx.advance(2.5 * HOUR_MS);
-  assert.equal(checkIn(ctx.db, booking.code.toLowerCase(), ctx.clock()).status, 'checked_in');
-  assert.throws(() => checkIn(ctx.db, booking.code, ctx.clock()), { status: 409 }); // already used
-  assert.equal(getSpot(ctx.db, 1, { startAt: ctx.clock(), hours: 1 }, ctx.clock()).slots[0].status, 'occupied');
+  // The token never appears in booking data, only in the QR.
+  const token = passOf(ctx, a).split(':')[1];
+  for (const seen of [a, getUserBooking(ctx.db, { bookingId: a.id, userId: ctx.alice }, ctx.clock()),
+    getBookingForAdmin(ctx.db, a.id, ctx.clock()), ...listAllBookings(ctx.db, ctx.clock()).bookings]) {
+    assert.ok(!JSON.stringify(seen).includes(token));
+  }
 
-  assert.throws(() => checkIn(ctx.db, 'PK-NOPE-NOPE', ctx.clock()), { status: 404 });
+  const hold = createHold(ctx.db, { userId: ctx.alice, slotId: 3, startAt: T0, hours: 1 }, ctx.clock());
+  assert.throws(() => passOf(ctx, hold), { status: 409, message: /Pay for this booking/ });
+  assert.throws(() => getPassPayload(ctx.db, { bookingId: a.id, userId: ctx.bob }, ctx.clock()), { status: 404 });
 });
 
-test('check-in after the window has ended is rejected', async () => {
+test('scanning the pass checks in any time within the booked window, once', async () => {
+  const ctx = setup();
+  const booking = await bookAndPay(ctx, ctx.alice, { startAt: T0 + HOUR_MS, hours: 2 });
+  const pass = passOf(ctx, booking); // drivers can get their pass before the window starts
+
+  assert.throws(() => scan(ctx, pass), { status: 400, message: /not started/ });
+  ctx.advance(2.5 * HOUR_MS);
+  // Handheld scanners type the payload into a text box, so case and stray whitespace are tolerated.
+  const checkedIn = scan(ctx, ` ${pass.toLowerCase()}\n`);
+  assert.equal(checkedIn.status, 'checked_in');
+  assert.equal(checkedIn.checkin_method, 'qr');
+  assert.equal(checkedIn.checked_in_by_name, 'Gate Staff');
+  assert.equal(checkedIn.user_name, 'alice'); // staff see whose booking it is
+  assert.equal(checkedIn.checked_in_at, ctx.clock());
+
+  const again = (() => { try { scan(ctx, pass); } catch (err) { return err; } })();
+  assert.equal(again.status, 409);
+  assert.equal(again.extra.booking.id, booking.id);
+  assert.equal(getSpot(ctx.db, 1, { startAt: ctx.clock(), hours: 1 }, ctx.clock()).slots[0].status, 'occupied');
+  assert.throws(() => passOf(ctx, booking), { status: 409, message: /already been checked in/ });
+});
+
+test('only a genuine pass checks in: the booking reference, other QR codes and made-up tokens do not', async () => {
   const ctx = setup();
   const booking = await bookAndPay(ctx, ctx.alice, { startAt: T0, hours: 1 });
+
+  assert.throws(() => scan(ctx, booking.code), { status: 400, message: /references can't be used/ });
+  assert.throws(() => scan(ctx, 'https://example.com/'), { status: 400, message: /not a ParkSlot/ });
+  assert.throws(() => scan(ctx, 'PARKSLOT:1234'), { status: 400 });
+  assert.throws(() => scan(ctx, ''), { status: 400 });
+  assert.throws(() => scan(ctx, undefined), { status: 400 });
+  assert.throws(() => scan(ctx, `PARKSLOT:${'A'.repeat(32)}`), { status: 404 });
+  assert.equal(getUserBooking(ctx.db, { bookingId: booking.id, userId: ctx.alice }, ctx.clock()).status, 'confirmed');
+});
+
+test('a pass is refused after the window ends, or once the booking is cancelled', async () => {
+  const ctx = setup();
+  const ended = await bookAndPay(ctx, ctx.alice, { slotId: 1, startAt: T0, hours: 1 });
+  const cancelled = await bookAndPay(ctx, ctx.alice, { slotId: 2, startAt: T0 + 2 * HOUR_MS, hours: 1 });
+  const endedPass = passOf(ctx, ended);
+  const cancelledPass = passOf(ctx, cancelled);
+  await cancelBooking(ctx.db, ctx.gateway, { bookingId: cancelled.id, userId: ctx.alice }, ctx.clock);
+  assert.throws(() => passOf(ctx, cancelled), { status: 409, message: /cancelled/ });
+
+  ctx.advance(2 * HOUR_MS);
+  assert.throws(() => scan(ctx, endedPass), { status: 410 });
+  assert.throws(() => passOf(ctx, ended), { status: 409, message: /ended/ });
+  assert.throws(() => scan(ctx, cancelledPass), { status: 409, message: /cancelled/ });
+});
+
+test('staff can check a booking in manually, under the same rules, and it is recorded as manual', async () => {
+  const ctx = setup();
+  const booking = await bookAndPay(ctx, ctx.alice, { startAt: T0 + HOUR_MS, hours: 1 });
+  const hold = createHold(ctx.db, { userId: ctx.bob, slotId: 2, startAt: T0, hours: 1 }, ctx.clock());
+  const manual = (bookingId) => checkInManually(ctx.db, { bookingId, staffId: ctx.staff }, ctx.clock());
+
+  assert.throws(() => manual(booking.id), { status: 400 }); // not started
+  assert.throws(() => manual(hold.id), { status: 409, message: /not been paid/ });
+  assert.throws(() => manual(9999), { status: 404 });
   ctx.advance(HOUR_MS);
-  assert.throws(() => checkIn(ctx.db, booking.code, ctx.clock()), { status: 410 });
+  const checkedIn = manual(booking.id);
+  assert.deepEqual([checkedIn.status, checkedIn.checkin_method, checkedIn.checked_in_by_name], ['checked_in', 'manual', 'Gate Staff']);
+  assert.throws(() => manual(booking.id), { status: 409 });
+  assert.throws(() => scan(ctx, `PARKSLOT:${'0'.repeat(32)}`), { status: 404 });
 });
 
 test('cancelling a paid booking before it starts refunds it and frees the slot', async () => {
@@ -177,7 +255,7 @@ test('booking history lists finished paid bookings, newest first, and leaves out
   const ctx = setup();
   const lapsed = await bookAndPay(ctx, ctx.alice, { slotId: 1, startAt: T0, hours: 1 });
   const completed = await bookAndPay(ctx, ctx.alice, { slotId: 2, startAt: T0, hours: 1 });
-  checkIn(ctx.db, completed.code, ctx.clock());
+  scan(ctx, passOf(ctx, completed));
   const refunded = await bookAndPay(ctx, ctx.alice, { slotId: 1, startAt: T0 + 3 * HOUR_MS, hours: 1 });
   await cancelBooking(ctx.db, ctx.gateway, { bookingId: refunded.id, userId: ctx.alice }, ctx.clock);
   const released = createHold(ctx.db, { userId: ctx.alice, slotId: 2, startAt: T0 + 5 * HOUR_MS, hours: 1 }, ctx.clock());
@@ -229,7 +307,7 @@ test('a booking receipt lists every payment attempt and refund, and only its own
   assert.throws(() => getUserBooking(ctx.db, { bookingId: hold.id, userId: ctx.bob }, ctx.clock()), { status: 404 });
 });
 
-test('admins can search every booking by code, driver name or email', async () => {
+test('admins can search every booking by reference, driver name or email', async () => {
   const ctx = setup();
   const alices = await bookAndPay(ctx, ctx.alice, { slotId: 1 });
   const bobs = await bookAndPay(ctx, ctx.bob, { slotId: 2 });

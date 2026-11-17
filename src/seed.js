@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { config, HOUR_MS } from './config.js';
 import { openDb, transaction } from './db.js';
 import { createAccount, hasAdmin, hashPassword } from './services/auth.js';
+import { newPassToken } from './services/passes.js';
 
 export const DEMO_USER = { name: 'Demo User', email: 'demo@parking.test', password: 'demo1234' };
 export const DEMO_ADMIN = { name: 'Demo Admin', email: 'admin@parking.test', password: 'admin1234' };
@@ -42,8 +43,9 @@ export function seedDemoData(db, center, now = Date.now()) {
     const insertSpot = db.prepare('INSERT INTO parking_spots (name, address, lat, lng, hourly_rate) VALUES (?, ?, ?, ?, ?)');
     const insertSlot = db.prepare('INSERT INTO slots (spot_id, label) VALUES (?, ?)');
     const insertBooking = db.prepare(`
-      INSERT INTO bookings (code, slot_id, user_id, start_at, end_at, hours, amount, status, checked_in_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bookings
+        (code, slot_id, user_id, start_at, end_at, hours, amount, status, checked_in_at, created_at, checkin_token)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let user = db.prepare('SELECT id FROM users WHERE email = ?').get(DEMO_USER.email);
@@ -57,9 +59,10 @@ export function seedDemoData(db, center, now = Date.now()) {
       INSERT INTO payments (booking_id, amount, status, provider_ref, card_last4, created_at)
       VALUES (?, ?, 'succeeded', ?, '4242', ?)
     `);
-    // Demo bookings are paid, so each gets the payment record a real checkout would leave.
+    // Demo bookings are paid, so each gets the QR pass token and payment record a real checkout would leave.
+    // Pass tokens are secrets, so they come from crypto rather than the seeded PRNG.
     const book = (...args) => {
-      const { lastInsertRowid } = insertBooking.run(...args);
+      const { lastInsertRowid } = insertBooking.run(...args, newPassToken());
       insertPayment.run(lastInsertRowid, args[6], `mock_ch_demo_${lastInsertRowid}`, now);
     };
 

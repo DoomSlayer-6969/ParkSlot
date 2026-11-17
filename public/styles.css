@@ -145,11 +145,14 @@ dialog::backdrop { background: rgb(17 24 39 / 0.45); }
 .hold { background: var(--booked-bg); color: var(--booked); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.9rem; }
 
 .code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-weight: 700; letter-spacing: 0.05em; }
-.code-box {
-  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
-  padding: 0.9rem 1rem; border: 2px dashed var(--primary); border-radius: var(--radius); margin: 0.25rem 0 1rem;
+.actions.start { justify-content: flex-start; }
+
+/* The QR pass stays black on white whatever the theme: scanners need the contrast. */
+.qr-pass {
+  width: fit-content; margin: 0.5rem auto 1rem; padding: 0.5rem; background: #fff;
+  border: 1px solid var(--border); border-radius: var(--radius);
 }
-.code-box .code { font-size: 1.5rem; color: var(--primary); }
+.qr-pass img { display: block; width: min(260px, 70vw); height: auto; image-rendering: pixelated; }
 
 .booking-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.6rem; max-height: 60vh; overflow-y: auto; }
 .booking { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem; display: grid; gap: 0.3rem; justify-items: start; }
@@ -202,6 +205,15 @@ select {
 
 .narrow { width: min(480px, calc(100vw - 2rem)); margin: 2rem auto; display: grid; gap: 1rem; }
 .card { background: var(--surface); border-radius: 14px; padding: 1.5rem; box-shadow: var(--shadow); }
-.code-input { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; text-transform: uppercase; font-size: 1.2rem; }
+.scanner-view { position: relative; margin: 0.75rem 0 0.5rem; border-radius: var(--radius); overflow: hidden; background: #000; aspect-ratio: 4 / 3; }
+.scanner-view video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.scanner-frame {
+  position: absolute; top: 50%; left: 50%; width: 55%; aspect-ratio: 1; transform: translate(-50%, -50%);
+  border: 3px solid rgb(255 255 255 / 0.9); border-radius: 12px; box-shadow: 0 0 0 100vmax rgb(0 0 0 / 0.35);
+}
+.scan-form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.scan-row { display: flex; gap: 0.5rem; }
+.scan-row input { flex: 1; min-width: 0; }
+.manual-checkin { margin: 0.5rem 0 1rem; padding: 0.75rem; border: 1px dashed var(--border); border-radius: var(--radius); }
 .result.ok { border-left: 6px solid var(--free); }
 .result.bad { border-left: 6px solid var(--occupied); }

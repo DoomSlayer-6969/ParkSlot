@@ -1,4 +1,5 @@
 import express from 'express';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { HttpError } from './errors.js';
@@ -7,12 +8,15 @@ import {
 } from './services/auth.js';
 import { createConsoleMailer } from './services/mailer.js';
 import {
-  cancelBooking, checkIn, createHold, getBookingForAdmin, getUserBooking, listAllBookings, listUserBookings,
-  payForBooking,
+  cancelBooking, createHold, getBookingForAdmin, getUserBooking, listAllBookings, listUserBookings, payForBooking,
 } from './services/bookings.js';
+import { checkInManually, checkInWithPass, getPassPayload } from './services/checkin.js';
+import { qrSvg } from './services/passes.js';
 import { findNearby, getSpot } from './services/spots.js';
 
 const publicDir = fileURLToPath(new URL('../public', import.meta.url));
+// QR decoder for the admin portal's camera scanner, used where the browser has no BarcodeDetector.
+const jsQrFile = createRequire(import.meta.url).resolve('jsqr');
 
 function number(value, name, fallback) {
   if (value === undefined || value === '') {
@@ -39,6 +43,7 @@ export function createApp({ db, gateway, mailer = createConsoleMailer(), clock =
   // The old shared-key attendant screen is now part of the admin portal.
   app.get('/attendant.html', (req, res) => res.redirect(301, '/admin/'));
   app.use(express.static(publicDir));
+  app.get('/vendor/jsQR.js', (req, res) => res.sendFile(jsQrFile));
 
   // The driver app and the admin portal are separate: a session only works in the portal of its account's role.
   const requireRole = (role) => (req, res, next) => {
@@ -119,6 +124,12 @@ export function createApp({ db, gateway, mailer = createConsoleMailer(), clock =
     }, clock()));
   });
 
+  // The QR pass the driver shows at the gate. It is a credential, so it is never cached.
+  app.get('/api/bookings/:id/qr', requireUser, (req, res) => {
+    const payload = getPassPayload(db, { bookingId: number(req.params.id, 'id'), userId: req.user.id }, clock());
+    res.set('Cache-Control', 'no-store').type('image/svg+xml').send(qrSvg(payload));
+  });
+
   app.post('/api/bookings/:id/pay', requireUser, async (req, res) => {
     res.json(await payForBooking(db, gateway, {
       bookingId: number(req.params.id, 'id'),
@@ -140,13 +151,20 @@ export function createApp({ db, gateway, mailer = createConsoleMailer(), clock =
   });
   admin.get('/auth/me', requireAdmin, (req, res) => res.json({ user: req.user }));
 
-  admin.post('/checkin', requireAdmin, (req, res) => res.json(checkIn(db, req.body?.code, clock())));
+  // `qr` is the text read from the driver's QR code by the camera scanner or a handheld scanner.
+  admin.post('/checkin', requireAdmin, (req, res) => {
+    res.json(checkInWithPass(db, { scanned: req.body?.qr, staffId: req.user.id }, clock()));
+  });
 
   admin.get('/bookings', requireAdmin, (req, res) => {
     res.json(listAllBookings(db, clock(), { ...listOptions(req.query), q: req.query.q }));
   });
   admin.get('/bookings/:id', requireAdmin, (req, res) => {
     res.json(getBookingForAdmin(db, number(req.params.id, 'id'), clock()));
+  });
+  // For a driver who cannot show their QR code, once staff have checked who they are.
+  admin.post('/bookings/:id/checkin', requireAdmin, (req, res) => {
+    res.json(checkInManually(db, { bookingId: number(req.params.id, 'id'), staffId: req.user.id }, clock()));
   });
   app.use('/api/admin', admin);
 

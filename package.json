@@ -12,10 +12,12 @@
     "dev": "node --watch --env-file-if-exists=.env src/server.js",
     "seed": "node src/seed.js",
     "create-admin": "node src/create-admin.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "express": "^5.1.0",
-    "nodemailer": "10.3.1"
+    "jsqr": "1.4.0",
+    "nodemailer": "10.3.1",
+    "uqr": "0.1.3"
   }
 }

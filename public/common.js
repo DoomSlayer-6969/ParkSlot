@@ -30,7 +30,10 @@ export async function request(path, { method = 'GET', body, headers = {} } = {})
     headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
+  // JSON responses are parsed; anything else (such as a QR code SVG) comes back as text. Errors are always JSON.
+  const isJson = res.headers.get('content-type')?.includes('application/json');
+  let data = {};
+  if (res.status !== 204) data = isJson || !res.ok ? await res.json().catch(() => ({})) : await res.text();
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;

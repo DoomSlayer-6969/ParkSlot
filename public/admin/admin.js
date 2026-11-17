@@ -1,4 +1,5 @@
 import { $, esc, fmtDateTime, money as formatMoney, paymentList, request, STATUS_TEXT, storage } from '../common.js';
+import { startScanner } from './scanner.js';
 
 // Admin sessions are kept apart from the driver app's (which uses the 'token' key).
 const TOKEN_KEY = 'adminToken';
@@ -36,11 +37,13 @@ function render() {
     ? `<span class="who">${esc(state.user.name)}</span><button class="btn ghost" id="logout-btn">Sign out</button>`
     : '';
   if (signedIn) {
+    if (!$('#checkin-panel').hidden) focusScanInput();
     $('#logout-btn').onclick = async () => {
       await api('/api/admin/auth/logout', { method: 'POST' }).catch(() => {});
       setSession(null, null);
     };
   } else {
+    stopCamera();
     state.bookingsLoaded = false;
     $('#bookings-body').innerHTML = '';
     $('#checkin-result').innerHTML = '';
@@ -69,40 +72,128 @@ function showPanel(name) {
   }
   $('#checkin-panel').hidden = name !== 'checkin';
   $('#bookings-panel').hidden = name !== 'bookings';
-  if (name === 'bookings' && !state.bookingsLoaded) searchBookings();
+  if (name === 'bookings') {
+    stopCamera();
+    if (!state.bookingsLoaded) searchBookings();
+  } else {
+    focusScanInput();
+  }
 }
 
 for (const tab of document.querySelectorAll('[data-panel]')) {
   tab.addEventListener('click', () => showPanel(tab.dataset.panel));
 }
+for (const link of document.querySelectorAll('[data-panel-link]')) {
+  link.addEventListener('click', (e) => {
+    e.preventDefault();
+    showPanel(link.dataset.panelLink);
+  });
+}
 
 // ---------------------------------------------------------------- check-in
+
+// Staff scan the QR pass on the driver's phone, with this device's camera or a handheld (USB/Bluetooth)
+// scanner, which types the QR code's text into the input followed by Enter.
+
+const CHECKED_IN_BY = { qr: 'QR scan', manual: 'manually' };
+
+function checkedInText(b) {
+  const how = CHECKED_IN_BY[b.checkin_method];
+  return `${fmtDateTime(b.checked_in_at)}${how ? ` · ${how}` : ''}${b.checked_in_by_name ? ` by ${esc(b.checked_in_by_name)}` : ''}`;
+}
 
 function bookingDetails(b) {
   return `
     <dl class="summary">
-      <dt>Booking</dt><dd class="code">${esc(b.code)}</dd>
+      <dt>Driver</dt><dd>${esc(b.user_name)}</dd>
       <dt>Spot</dt><dd>${esc(b.spot_name)}</dd>
       <dt>Slot</dt><dd><b>${esc(b.slot_label)}</b></dd>
       <dt>Window</dt><dd>${fmtDateTime(b.start_at)} – ${fmtDateTime(b.end_at)}</dd>
       <dt>Status</dt><dd>${STATUS_TEXT[b.status] ?? esc(b.status)}</dd>
+      ${b.checked_in_at ? `<dt>Checked in</dt><dd>${checkedInText(b)}</dd>` : ''}
+      <dt>Reference</dt><dd class="code">${esc(b.code)}</dd>
     </dl>`;
 }
 
-$('#checkin-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const form = e.target;
+const scan = { busy: false, last: null, lastAt: 0, stop: null };
+// While a pass is held in front of the camera it is read many times a second; it is sent once.
+const SAME_PASS_IGNORE_MS = 8000;
+
+async function submitScan(text, { fromCamera = false } = {}) {
+  if (scan.busy) return;
+  const now = Date.now();
+  if (fromCamera && text === scan.last && now - scan.lastAt < SAME_PASS_IGNORE_MS) return;
+  scan.busy = true;
+  scan.last = text;
+  scan.lastAt = now;
+
   const result = $('#checkin-result');
   try {
-    const booking = await api('/api/admin/checkin', { method: 'POST', body: { code: form.code.value } });
+    const booking = await api('/api/admin/checkin', { method: 'POST', body: { qr: text } });
     result.innerHTML = `<div class="card result ok"><h2>Checked in — direct the driver to slot ${esc(booking.slot_label)}</h2>${bookingDetails(booking)}</div>`;
-    form.code.value = '';
+    navigator.vibrate?.(120);
     state.bookingsLoaded = false; // statuses changed
   } catch (err) {
     const booking = err.data?.booking;
     result.innerHTML = `<div class="card result bad"><h2>${esc(err.message)}</h2>${booking ? bookingDetails(booking) : ''}</div>`;
+    navigator.vibrate?.([80, 60, 80]);
+  } finally {
+    scan.busy = false;
+  }
+}
+
+function focusScanInput() {
+  // On touch devices focusing would pop up the keyboard; handheld scanners are used with desktops.
+  if (matchMedia('(pointer: fine)').matches) $('#checkin-form').qr.focus();
+}
+
+$('#checkin-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = e.target.qr;
+  const text = input.value.trim();
+  input.value = '';
+  if (text) submitScan(text);
+  input.focus();
+});
+
+function setCameraUi(on, status = '') {
+  $('#scanner-view').hidden = !on;
+  $('#camera-btn').textContent = on ? 'Stop camera' : 'Scan with camera';
+  $('#scanner-status').textContent = status;
+}
+
+function stopCamera() {
+  scan.stop?.();
+  scan.stop = null;
+  setCameraUi(false);
+}
+
+$('#camera-btn').addEventListener('click', async (e) => {
+  if (scan.stop) {
+    stopCamera();
+    return;
+  }
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  setCameraUi(true, 'Starting the camera…');
+  try {
+    const stop = await startScanner($('#scanner-video'), (text) => submitScan(text, { fromCamera: true }));
+    if (!state.user || $('#checkin-panel').hidden) {
+      stop(); // signed out or switched tabs while the camera was starting
+      return;
+    }
+    scan.stop = stop;
+    setCameraUi(true, 'Hold the QR code inside the frame.');
+  } catch (err) {
+    setCameraUi(false);
+    $('#scanner-status').innerHTML = `<span class="error">${esc(err.message)}</span>`;
+  } finally {
+    btn.disabled = false;
   }
 });
+
+// Release the camera when the portal is in the background.
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
 
 // ---------------------------------------------------------------- bookings
 
@@ -168,6 +259,9 @@ $('#bookings-body').addEventListener('keydown', (e) => { if (e.key === 'Enter') 
 const dialog = $('#modal');
 $('#modal-close').addEventListener('click', () => dialog.close());
 dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); });
+dialog.addEventListener('close', () => {
+  if (!state.bookingsLoaded && !$('#bookings-panel').hidden) searchBookings(); // a booking was checked in
+});
 
 async function showBooking(id) {
   let b;
@@ -186,12 +280,32 @@ async function showBooking(id) {
       <dt>Spot</dt><dd>${esc(b.spot_name)}<br><span class="muted small">${esc(b.spot_address)}</span></dd>
       <dt>Slot</dt><dd>${esc(b.slot_label)}</dd>
       <dt>Window</dt><dd>${fmtDateTime(b.start_at)} – ${fmtDateTime(b.end_at)} (${b.hours} h)</dd>
-      ${b.checked_in_at ? `<dt>Checked in</dt><dd>${fmtDateTime(b.checked_in_at)}</dd>` : ''}
+      ${b.checked_in_at ? `<dt>Checked in</dt><dd>${checkedInText(b)}</dd>` : ''}
       <dt>Created</dt><dd>${fmtDateTime(b.created_at)}</dd>
     </dl>
+    ${b.status === 'confirmed' ? `
+      <div class="manual-checkin">
+        <p class="muted small">Driver can't show their QR code? Check their ID matches the name above, then check them in here.</p>
+        <p class="error" id="manual-error"></p>
+        <div class="actions start"><button class="btn primary" id="manual-checkin">Check in manually</button></div>
+      </div>` : ''}
     <h3 class="section-title">Payments</h3>
     ${paymentList(b.payments, money)}`;
   if (!dialog.open) dialog.showModal();
+
+  $('#manual-checkin')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (!confirm(`Check in ${b.user_name} to slot ${b.slot_label} without their QR code?`)) return;
+    btn.disabled = true;
+    try {
+      await api(`/api/admin/bookings/${b.id}/checkin`, { method: 'POST' });
+      state.bookingsLoaded = false;
+      showBooking(b.id);
+    } catch (err) {
+      $('#manual-error').textContent = err.message;
+      btn.disabled = false;
+    }
+  });
 }
 
 // ---------------------------------------------------------------- init

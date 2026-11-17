@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { newPassToken } from './services/passes.js';
 
 // Times are epoch milliseconds; money is in the currency's smallest unit.
 const SCHEMA = `
@@ -47,7 +48,8 @@ CREATE TABLE IF NOT EXISTS slots (
 
 CREATE TABLE IF NOT EXISTS bookings (
   id              INTEGER PRIMARY KEY,
-  code            TEXT UNIQUE,          -- issued only once payment succeeds
+  code            TEXT UNIQUE,          -- booking reference, issued only once payment succeeds
+  checkin_token   TEXT,                 -- secret behind the driver's QR pass, issued with the code
   slot_id         INTEGER NOT NULL REFERENCES slots(id),
   user_id         INTEGER NOT NULL REFERENCES users(id),
   start_at        INTEGER NOT NULL,
@@ -57,6 +59,8 @@ CREATE TABLE IF NOT EXISTS bookings (
   status          TEXT NOT NULL CHECK (status IN ('pending_payment', 'confirmed', 'checked_in', 'cancelled')),
   hold_expires_at INTEGER,              -- set while status = 'pending_payment'
   checked_in_at   INTEGER,
+  checkin_method  TEXT CHECK (checkin_method IN ('qr', 'manual')),
+  checked_in_by   INTEGER REFERENCES users(id),  -- the admin who scanned the pass or checked in manually
   created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bookings_slot_time ON bookings(slot_id, start_at, end_at);
@@ -83,11 +87,32 @@ export function openDb(file) {
   return db;
 }
 
+const columnsOf = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+
 // Brings databases created by older versions up to the current schema.
 function migrate(db) {
-  const userColumns = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
-  if (!userColumns.includes('role')) {
+  if (!columnsOf(db, 'users').includes('role')) {
     db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin'))");
+  }
+
+  // QR check-in passes.
+  const bookingColumns = columnsOf(db, 'bookings');
+  if (!bookingColumns.includes('checkin_token')) db.exec('ALTER TABLE bookings ADD COLUMN checkin_token TEXT');
+  if (!bookingColumns.includes('checkin_method')) {
+    db.exec("ALTER TABLE bookings ADD COLUMN checkin_method TEXT CHECK (checkin_method IN ('qr', 'manual'))");
+  }
+  if (!bookingColumns.includes('checked_in_by')) {
+    db.exec('ALTER TABLE bookings ADD COLUMN checked_in_by INTEGER REFERENCES users(id)');
+  }
+  // Here rather than in SCHEMA, which runs before the column exists on older databases.
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_checkin_token ON bookings(checkin_token)');
+  // Bookings paid before passes existed get one, so their drivers can still check in.
+  const unissued = db.prepare('SELECT id FROM bookings WHERE code IS NOT NULL AND checkin_token IS NULL').all();
+  if (unissued.length) {
+    transaction(db, () => {
+      const issue = db.prepare('UPDATE bookings SET checkin_token = ? WHERE id = ?');
+      for (const { id } of unissued) issue.run(newPassToken(), id);
+    });
   }
 }
 
