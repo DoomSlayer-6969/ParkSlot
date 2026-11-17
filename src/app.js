@@ -7,13 +7,18 @@ import { roleGuard } from './http.js';
 import { adminRoutes } from './routes/admin.js';
 import { driverRoutes } from './routes/driver.js';
 import { createConsoleMailer } from './services/mailer.js';
+import { createNoTrafficProvider, createTrafficUpdater } from './services/traffic.js';
 
 const publicDir = fileURLToPath(new URL('../public', import.meta.url));
 // QR decoder for the admin portal's camera scanner, used where the browser has no BarcodeDetector.
 const jsQrFile = createRequire(import.meta.url).resolve('jsqr');
 
-/** The whole app. Dependencies are injected so tests can use an in-memory DB, fake mailer and fake clock. */
-export function createApp({ db, gateway, mailer = createConsoleMailer(), clock = Date.now }) {
+/**
+ * The whole app. Dependencies are injected so tests can use an in-memory DB, fake mailer, fake traffic
+ * provider and fake clock. `traffic` is a traffic provider (services/traffic.js); without one, prices carry
+ * no traffic surcharge.
+ */
+export function createApp({ db, gateway, mailer = createConsoleMailer(), traffic = createNoTrafficProvider(), clock = Date.now }) {
   const app = express();
   app.use(express.json({ limit: '10kb' }));
   // The old shared-key attendant screen is now part of the admin portal.
@@ -21,21 +26,29 @@ export function createApp({ db, gateway, mailer = createConsoleMailer(), clock =
   app.use(express.static(publicDir));
   app.get('/vendor/jsQR.js', (req, res) => res.sendFile(jsQrFile));
 
+  // Everything the browser needs from the server's settings (no secrets).
   app.get('/api/config', (req, res) => {
     res.json({
       currency: config.currency,
       defaultCenter: config.defaultCenter,
+      searchRadiusKm: config.searchRadiusKm,
+      mapTileUrl: config.mapTileUrl,
+      mapAttribution: config.mapAttribution,
+      geocoderUrl: config.geocoderUrl,
+      geocoderCountryCodes: config.geocoderCountryCodes,
       holdMinutes: config.holdMinutes,
       maxHours: config.maxHours,
       maxAdvanceDays: config.maxAdvanceDays,
       resetTokenMinutes: config.resetTokenMinutes,
+      // Which live traffic feed prices use ('tomtom' or 'none'), for the attribution next to prices.
+      trafficProvider: traffic.name,
       // Lets the admin portal, opened over plain HTTP on a network address, link to the HTTPS
       // address where the browser allows the camera.
       httpsPort: config.httpsPort,
     });
   });
 
-  const deps = { db, gateway, mailer, clock, requireRole: roleGuard(db, clock) };
+  const deps = { db, gateway, mailer, clock, requireRole: roleGuard(db, clock), traffic: createTrafficUpdater(traffic) };
   app.use('/api/admin', adminRoutes(deps));
   app.use('/api', driverRoutes(deps));
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));

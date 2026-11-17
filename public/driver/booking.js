@@ -37,7 +37,7 @@ export function startBooking(slotId) {
         method: 'POST',
         body: { slotId, startAt: s.window.start_at, hours },
       });
-      showPayment(booking);
+      showPayment(booking, { quotedRate: s.hourly_rate });
     } catch (err) {
       $('#book-error').textContent = err.message;
       setModalOnClose(refreshSpot);
@@ -45,7 +45,13 @@ export function startBooking(slotId) {
   };
 }
 
-function showPayment(booking) {
+/** `quotedRate` is the price the driver saw; the hold fixes the current one, which traffic may have changed. */
+function showPayment(booking, { quotedRate } = {}) {
+  const rate = booking.amount / booking.hours;
+  const priceNote = quotedRate && rate !== quotedRate
+    ? `<p class="hold">Traffic around the lot changed since you opened it, so the price is now <b>${money(rate)}</b> per hour
+        (was ${money(quotedRate)}). Cancel if you don't want it at this price.</p>`
+    : '';
   const releaseHold = () => api(`/api/bookings/${booking.id}/cancel`, { method: 'POST' }).catch(() => {}).finally(refreshSpot);
 
   openModal(`
@@ -53,6 +59,7 @@ function showPayment(booking) {
     <p class="muted">Slot <b>${esc(booking.slot_label)}</b> at ${esc(booking.spot_name)}<br>
       ${fmtDateTime(booking.start_at)} – ${fmtDateTime(booking.end_at)}</p>
     <p class="total">Total <b>${money(booking.amount)}</b> <span class="muted">(${booking.hours} h)</span></p>
+    ${priceNote}
     <p class="hold" id="hold-timer"></p>
     <form id="pay-form" class="form" autocomplete="on">
       <label>Name on card <input name="name" required autocomplete="cc-name"></label>

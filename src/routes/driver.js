@@ -1,5 +1,6 @@
 // The driver app's API, mounted at /api: driver accounts, finding parking, and booking.
 import express from 'express';
+import { config } from '../config.js';
 import { listOptions, number } from '../http.js';
 import { login, logout, register } from '../services/auth.js';
 import {
@@ -8,9 +9,9 @@ import {
 import { getPassPayload } from '../services/checkin.js';
 import { qrSvg } from '../services/passes.js';
 import { confirmPasswordReset, requestPasswordReset, RESET_REQUESTED_MESSAGE } from '../services/password-reset.js';
-import { findNearby, getSpot } from '../services/spots.js';
+import { findNearby, getSpot, spotIdOfSlot, spotsWithin } from '../services/spots.js';
 
-export function driverRoutes({ db, gateway, mailer, clock, requireRole }) {
+export function driverRoutes({ db, gateway, mailer, clock, requireRole, traffic }) {
   const router = express.Router();
   const requireUser = requireRole('user');
 
@@ -33,16 +34,21 @@ export function driverRoutes({ db, gateway, mailer, clock, requireRole }) {
   });
 
   // --- Parking spots (public) ---
-  router.get('/spots', (req, res) => {
+  // Prices depend on live traffic, so each lot's traffic reading is refreshed (if it is older than
+  // TRAFFIC_CACHE_SECONDS) before it is priced.
+  router.get('/spots', async (req, res) => {
     const lat = number(req.query.lat, 'lat');
     const lng = number(req.query.lng, 'lng');
-    const radiusKm = Math.min(Math.max(number(req.query.radius, 'radius', 3), 0.1), 20);
+    const radiusKm = Math.min(Math.max(number(req.query.radius, 'radius', config.searchRadiusKm), 0.1), config.maxSearchRadiusKm);
+    await traffic.refresh(db, spotsWithin(db, { lat, lng, radiusKm }).map((s) => s.id), clock);
     res.json({ spots: findNearby(db, { lat, lng, radiusKm }, clock()) });
   });
 
-  router.get('/spots/:id', (req, res) => {
+  router.get('/spots/:id', async (req, res) => {
+    const spotId = number(req.params.id, 'id');
+    await traffic.refresh(db, [spotId], clock);
     const now = clock();
-    res.json(getSpot(db, number(req.params.id, 'id'), {
+    res.json(getSpot(db, spotId, {
       startAt: number(req.query.start, 'start', now),
       hours: number(req.query.hours, 'hours', 1),
     }, now));
@@ -57,11 +63,15 @@ export function driverRoutes({ db, gateway, mailer, clock, requireRole }) {
 
   router.get('/bookings/:id', requireUser, (req, res) => res.json(getUserBooking(db, bookingRef(req), clock())));
 
-  router.post('/bookings', requireUser, (req, res) => {
+  // The hold fixes the price, so the lot's traffic is brought up to date first.
+  router.post('/bookings', requireUser, async (req, res) => {
     const body = req.body ?? {};
+    const slotId = number(body.slotId, 'slotId');
+    const spotId = spotIdOfSlot(db, slotId);
+    if (spotId) await traffic.refresh(db, [spotId], clock);
     res.status(201).json(createHold(db, {
       userId: req.user.id,
-      slotId: number(body.slotId, 'slotId'),
+      slotId,
       startAt: number(body.startAt, 'startAt'),
       hours: number(body.hours, 'hours'),
     }, clock()));

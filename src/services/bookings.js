@@ -7,6 +7,7 @@ import {
   ADMIN_BOOKING_SELECT, BOOKING_SELECT, loadAdminBooking, loadBooking, loadOwnBooking, present,
 } from './booking-records.js';
 import { newPassToken } from './passes.js';
+import { quoteSpot } from './pricing.js';
 
 // Booking references: no 0/O, 1/I/L so they are easy to read out to support.
 const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
@@ -47,13 +48,14 @@ function recordPayment(db, bookingId, amount, status, ref, last4, now) {
   `).run(bookingId, amount, status, ref ?? null, last4 ?? null, now);
 }
 
-/** Step 1: reserve the slot for `config.holdMinutes` while the user pays. */
+/**
+ * Step 1: reserve the slot for `config.holdMinutes` while the user pays. The amount is fixed here, at the
+ * lot's current price (pricing.js), so refresh the lot's traffic reading before calling this.
+ */
 export function createHold(db, { userId, slotId, startAt, hours }, now) {
   const window = resolveWindow(startAt, hours, now);
   return transaction(db, () => {
-    const slot = db.prepare(`
-      SELECT s.id, p.hourly_rate FROM slots s JOIN parking_spots p ON p.id = s.spot_id WHERE s.id = ?
-    `).get(slotId);
+    const slot = db.prepare('SELECT id, spot_id FROM slots WHERE id = ?').get(slotId);
     if (!slot) throw new HttpError(404, 'Slot not found');
     if (findConflict(db, slot.id, window.startAt, window.endAt, now)) {
       throw new HttpError(409, 'This slot is already booked for the selected time');
@@ -64,7 +66,7 @@ export function createHold(db, { userId, slotId, startAt, hours }, now) {
       VALUES (?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?)
     `).run(
       slot.id, userId, window.startAt, window.endAt, window.hours,
-      slot.hourly_rate * window.hours, now + config.holdMinutes * MINUTE_MS, now,
+      quoteSpot(db, { id: slot.spot_id }, now).hourly_rate * window.hours, now + config.holdMinutes * MINUTE_MS, now,
     );
     return present(loadBooking(db, Number(lastInsertRowid)), now);
   });

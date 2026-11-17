@@ -144,6 +144,20 @@ dialog::backdrop { background: rgb(17 24 39 / 0.45); }
 .total { font-size: 1.1rem; }
 .hold { background: var(--booked-bg); color: var(--booked); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.9rem; }
 
+/* ---------- dynamic prices ---------- */
+
+.price-box { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.6rem 0.75rem; margin: 0.5rem 0 0.75rem; }
+.price-main { margin: 0 0 0.35rem; font-size: 1.05rem; }
+.price-factors { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.2rem; font-size: 0.85rem; }
+.price-factors li { display: flex; justify-content: space-between; gap: 0.75rem; }
+.price-factors li span:last-child { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.price-box .muted.small { margin: 0.4rem 0 0; }
+.traffic { display: inline-block; font-size: 0.75rem; font-weight: 600; padding: 0.05rem 0.4rem; border-radius: 999px; margin-left: 0.3rem; }
+.traffic-light { background: var(--free-bg); color: var(--free); }
+.traffic-moderate { background: var(--booked-bg); color: var(--booked); }
+.traffic-heavy, .traffic-severe { background: var(--occupied-bg); color: var(--occupied); }
+.traffic-severe { font-weight: 700; }
+
 .code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-weight: 700; letter-spacing: 0.05em; }
 .actions.start { justify-content: flex-start; }
 

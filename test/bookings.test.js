@@ -8,6 +8,7 @@ import {
 } from '../src/services/bookings.js';
 import { checkInManually, checkInWithPass, getPassPayload } from '../src/services/checkin.js';
 import { createMockGateway, TEST_CARDS } from '../src/services/payments.js';
+import { quoteSpot } from '../src/services/pricing.js';
 import { findNearby, getSpot } from '../src/services/spots.js';
 
 const T0 = Date.UTC(2030, 0, 1, 10);
@@ -16,10 +17,10 @@ const card = (number = TEST_CARDS.success) => ({ name: 'Test', number, expiry: '
 function setup() {
   const db = openDb(':memory:');
   db.exec(`
-    INSERT INTO parking_spots (id, name, address, lat, lng, hourly_rate) VALUES
-      (1, 'Near Lot', '1 Test Rd', 10.000, 20.000, 5000),
-      (2, 'Far Lot',  '9 Test Rd', 10.020, 20.000, 3000),
-      (3, 'Out of range', 'Elsewhere', 10.500, 20.000, 3000);
+    INSERT INTO parking_spots (id, name, address, lat, lng) VALUES
+      (1, 'Near Lot', '1 Test Rd', 10.000, 20.000),
+      (2, 'Far Lot',  '9 Test Rd', 10.020, 20.000),
+      (3, 'Out of range', 'Elsewhere', 10.500, 20.000);
     INSERT INTO slots (id, spot_id, label) VALUES (1, 1, 'A1'), (2, 1, 'A2'), (3, 2, 'A1');
   `);
   let now = T0;
@@ -35,6 +36,9 @@ function setup() {
 /** What the gate scanner reads off the driver's QR pass. */
 const passOf = (ctx, booking) => getPassPayload(ctx.db, { bookingId: booking.id, userId: booking.user_id }, ctx.clock());
 const scan = (ctx, scanned) => checkInWithPass(ctx.db, { scanned, staffId: ctx.staff }, ctx.clock());
+
+/** The current hourly price of a lot (no traffic readings in these tests, so it follows from lot size). */
+const rateOf = (ctx, spotId) => quoteSpot(ctx.db, { id: spotId }, ctx.clock()).hourly_rate;
 
 async function bookAndPay(ctx, userId, { slotId = 1, startAt = T0, hours = 2 } = {}) {
   const hold = createHold(ctx.db, { userId, slotId, startAt, hours }, ctx.clock());
@@ -71,7 +75,7 @@ test('a paid booking gets a unique code, hourly price, and shows as booked', asy
   const b = await bookAndPay(ctx, ctx.bob, { slotId: 2, hours: 1 });
   assert.match(a.code, /^PK-[2-9A-Z]{4}-[2-9A-Z]{4}$/);
   assert.notEqual(a.code, b.code);
-  assert.equal(a.amount, 3 * 5000);
+  assert.equal(a.amount, 3 * rateOf(ctx, 1));
   assert.equal(a.status, 'confirmed');
 
   const spot = getSpot(ctx.db, 1, { startAt: T0, hours: 1 }, ctx.clock());
@@ -126,7 +130,7 @@ test('if the slot is taken while a slow payment is in flight, the payer is refun
   completeCharge();
 
   await assert.rejects(alicePays, { status: 409 });
-  assert.deepEqual(refunds, [{ ref: 'slow_1', amount: 5000 }]);
+  assert.deepEqual(refunds, [{ ref: 'slow_1', amount: rateOf(ctx, 1) }]);
   const confirmed = ctx.db.prepare("SELECT COUNT(*) AS n FROM bookings WHERE slot_id = 1 AND status = 'confirmed'").get();
   assert.equal(confirmed.n, 1);
 });
@@ -298,10 +302,11 @@ test('a booking receipt lists every payment attempt and refund, and only its own
 
   const receipt = getUserBooking(ctx.db, { bookingId: hold.id, userId: ctx.alice }, ctx.clock());
   assert.equal(receipt.status, 'cancelled');
+  const paid = 2 * rateOf(ctx, 1);
   assert.deepEqual(receipt.payments.map((p) => [p.status, p.amount, p.card_last4]), [
-    ['failed', 10000, null],
-    ['succeeded', 10000, '4242'],
-    ['refunded', 10000, '4242'],
+    ['failed', paid, null],
+    ['succeeded', paid, '4242'],
+    ['refunded', paid, '4242'],
   ]);
   assert.ok(!('provider_ref' in receipt.payments[0]));
   assert.throws(() => getUserBooking(ctx.db, { bookingId: hold.id, userId: ctx.bob }, ctx.clock()), { status: 404 });

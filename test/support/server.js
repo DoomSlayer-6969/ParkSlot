@@ -13,13 +13,14 @@ export function fakeMailer() {
 
 /**
  * Runs the real HTTP app on a random port against a fresh in-memory DB, closed when the test ends.
- * `setup(db)` runs before the server starts (insert spots, create admins...). `call(path, options)`
+ * `setup(db)` runs before the server starts (insert spots, create admins...). `traffic` is a traffic
+ * provider (default: none) and `clock` a time source (default: Date.now). `call(path, options)`
  * returns `{ status, headers, body }` with JSON or SVG bodies decoded.
  */
-export async function startServer(t, { mailer = fakeMailer(), setup } = {}) {
+export async function startServer(t, { mailer = fakeMailer(), setup, traffic, clock } = {}) {
   const db = openDb(':memory:');
   setup?.(db);
-  const server = createApp({ db, gateway: createMockGateway(), mailer }).listen(0, '127.0.0.1');
+  const server = createApp({ db, gateway: createMockGateway(), mailer, traffic, clock }).listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;

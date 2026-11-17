@@ -15,7 +15,7 @@ const DRIVER = { name: 'Driver', email: 'driver@test.dev', password: 'password1'
 /** One spot with one slot, and an admin account. */
 function fixtures(db) {
   db.exec(`
-    INSERT INTO parking_spots (id, name, address, lat, lng, hourly_rate) VALUES (1, 'Lot', '1 Test Rd', 10, 20, 5000);
+    INSERT INTO parking_spots (id, name, address, lat, lng) VALUES (1, 'Lot', '1 Test Rd', 10, 20);
     INSERT INTO slots (id, spot_id, label) VALUES (1, 1, 'A1');
   `);
   createAccount(db, { ...ADMIN, role: 'admin' }, Date.now());
@@ -204,6 +204,9 @@ test('opening a database from before QR passes adds the check-in columns and iss
     old.close();
 
     const db = openDb(file);
+    // Fixed hourly rates gave way to dynamic prices; the lot itself is kept.
+    assert.ok(!db.prepare('PRAGMA table_info(parking_spots)').all().some((c) => c.name === 'hourly_rate'));
+    assert.equal(db.prepare('SELECT name FROM parking_spots').get().name, 'Lot');
     const tokens = db.prepare('SELECT id, checkin_token FROM bookings ORDER BY id').all();
     assert.match(tokens[0].checkin_token, /^[0-9A-F]{32}$/);
     assert.match(tokens[1].checkin_token, /^[0-9A-F]{32}$/);

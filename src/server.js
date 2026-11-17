@@ -5,11 +5,13 @@ import { config } from './config.js';
 import { openDb } from './db.js';
 import { createMailerFromConfig } from './services/mailer.js';
 import { createMockGateway } from './services/payments.js';
+import { createTrafficProviderFromConfig } from './services/traffic.js';
 import { DEMO_ADMIN, DEMO_USER, ensureDemoAdmin, hasSpots, seedDemoData } from './seed.js';
 import { loadTlsCredentials, networkAddresses } from './tls.js';
 
-// Created first so a bad email or HTTPS configuration stops start-up before anything else happens.
+// Created first so a bad email, traffic or HTTPS configuration stops start-up before anything else happens.
 const mailer = createMailerFromConfig(config);
+const traffic = createTrafficProviderFromConfig(config.traffic);
 const lanAddresses = networkAddresses();
 const tlsHosts = ['localhost', '127.0.0.1', ...lanAddresses];
 const tls = config.httpsPort ? loadTlsCredentials(config, tlsHosts) : null;
@@ -22,8 +24,8 @@ function displayPath(path) {
 
 const db = openDb(config.dbFile);
 if (!hasSpots(db)) {
-  seedDemoData(db, config.defaultCenter);
-  console.log(`Seeded demo data. Demo login: ${DEMO_USER.email} / ${DEMO_USER.password}`);
+  const seeded = seedDemoData(db);
+  console.log(`Seeded ${seeded.lots} parking lots near ${seeded.stations} metro stations. Demo login: ${DEMO_USER.email} / ${DEMO_USER.password}`);
 }
 if (ensureDemoAdmin(db)) {
   console.log(`No admin account existed, so created a demo admin: ${DEMO_ADMIN.email} / ${DEMO_ADMIN.password}`);
@@ -38,9 +40,25 @@ if (mailer.kind === 'smtp') {
   console.log('Email: SMTP_HOST is not set, so emails are printed here instead of being sent.');
 }
 
-const app = createApp({ db, gateway: createMockGateway(), mailer });
+if (traffic.name === 'tomtom') {
+  console.log(`Traffic: live TomTom traffic prices lots (readings cached ${config.traffic.cacheSeconds} s).`);
+} else {
+  console.log('Traffic: no live traffic provider (set TOMTOM_API_KEY), so prices carry no traffic surcharge.');
+}
 
-app.listen(config.port, () => {
+const app = createApp({ db, gateway: createMockGateway(), mailer, traffic });
+
+/** A port that is taken (e.g. another copy of the server is running) stops start-up with a clear message. */
+const exitOnListenError = (what, port) => (err) => {
+  console.error(err.code === 'EADDRINUSE'
+    ? `${what} port ${port} is already in use (is another ParkSlot server running?). Stop it, or choose another port.`
+    : `Cannot listen on ${what} port ${port}: ${err.message}`);
+  process.exit(1);
+};
+
+// Express 5 calls this with the error when the port can't be used.
+app.listen(config.port, (err) => {
+  if (err) return exitOnListenError('HTTP', config.port)(err);
   console.log(`ParkSlot running at http://localhost:${config.port}`);
   console.log(`Admin portal: http://localhost:${config.port}/admin/ (the camera scanner works here)`);
 });
@@ -55,7 +73,7 @@ if (tls) {
       console.log(`  Admin portal for phones on this network: https://${address}:${config.httpsPort}/admin/`);
     }
     if (!config.tlsCertFile) console.log('  The certificate is self-signed: browsers warn once. Choose "Advanced", then continue to the site.');
-  });
+  }).on('error', exitOnListenError('HTTPS', config.httpsPort));
 } else if (lanAddresses.length) {
   console.log(`To use the camera scanner from a phone on this network, set HTTPS_PORT (e.g. HTTPS_PORT=3443) and restart.`);
 }

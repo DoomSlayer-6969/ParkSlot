@@ -122,6 +122,13 @@ const COMMANDS = {
   submit: (arg) => js(`${q(arg)}.requestSubmit()`),
   text: async (arg) => { await waitUntil(q(arg), arg); console.log(await js(`${q(arg)}.innerText`)); },
   eval: async (arg) => console.log(JSON.stringify(await js(arg))),
+  // set NAME <expression> — evaluate in the page and store the result as $NAME for later lines
+  async set(arg) {
+    const [name, ...rest] = arg.split(' ');
+    vars[name] = await js(rest.join(' '));
+    if (vars[name] == null) throw new Error(`${rest.join(' ')} gave nothing to store in $${name}`);
+    console.log(`${name} = ${vars[name]}`);
+  },
   // confirm-yes — answer OK to the next window.confirm() dialogs (headless cannot click them)
   'confirm-yes': () => js('window.confirm = () => true'),
   viewport: async (arg) => {

@@ -29,15 +29,26 @@ CREATE TABLE IF NOT EXISTS password_resets (
 );
 CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id);
 
+-- Prices are not stored: they are worked out from traffic and lot size (services/pricing.js).
 CREATE TABLE IF NOT EXISTS parking_spots (
   id          INTEGER PRIMARY KEY,
   name        TEXT NOT NULL,
   address     TEXT NOT NULL,
   lat         REAL NOT NULL,
-  lng         REAL NOT NULL,
-  hourly_rate INTEGER NOT NULL
+  lng         REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_spots_lat_lng ON parking_spots(lat, lng);
+
+-- Latest live traffic reading near each lot (a cache of the traffic provider, see services/traffic.js).
+CREATE TABLE IF NOT EXISTS traffic_readings (
+  spot_id         INTEGER PRIMARY KEY REFERENCES parking_spots(id) ON DELETE CASCADE,
+  source          TEXT NOT NULL,     -- provider name, e.g. 'tomtom'
+  current_speed   REAL NOT NULL,     -- km/h
+  free_flow_speed REAL NOT NULL,     -- km/h
+  confidence      REAL,              -- 0..1, from the provider
+  road_closure    INTEGER NOT NULL DEFAULT 0,
+  fetched_at      INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS slots (
   id      INTEGER PRIMARY KEY,
@@ -94,6 +105,9 @@ function migrate(db) {
   if (!columnsOf(db, 'users').includes('role')) {
     db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin'))");
   }
+
+  // Lots used to have a fixed hourly rate; prices are now dynamic (services/pricing.js).
+  if (columnsOf(db, 'parking_spots').includes('hourly_rate')) db.exec('ALTER TABLE parking_spots DROP COLUMN hourly_rate');
 
   // QR check-in passes.
   const bookingColumns = columnsOf(db, 'bookings');
