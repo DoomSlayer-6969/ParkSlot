@@ -1,4 +1,4 @@
-import { $, esc, fmtDateTime, fmtTime, money as formatMoney, request, STATUS_TEXT, storage } from './common.js';
+import { $, esc, fmtDateTime, fmtTime, money as formatMoney, paymentList, request, STATUS_TEXT, storage } from './common.js';
 
 const SEARCH_RADIUS_KM = 3;
 const HOUR_MS = 3_600_000;
@@ -355,45 +355,109 @@ function showSuccess(booking) {
 
 // ---------------------------------------------------------------- my bookings
 
-async function showMyBookings() {
-  let bookings;
-  try {
-    ({ bookings } = await api('/api/bookings'));
-  } catch (err) {
-    return openModal(`<h2>My bookings</h2><p class="error">${esc(err.message)}</p>`);
-  }
-  const visible = bookings.filter((b) => b.status !== 'expired' && !(b.status === 'cancelled' && !b.code));
+const BOOKING_TABS = {
+  upcoming: { label: 'Upcoming', empty: 'No upcoming bookings.' },
+  history: { label: 'History', empty: 'No past bookings yet. Bookings you have used, missed or cancelled show up here.' },
+};
 
+function bookingItem(b) {
+  const cancellable = b.status === 'confirmed' && b.start_at > Date.now();
+  return `
+    <li class="booking ${b.status}">
+      <div class="booking-head">
+        <span class="code">${esc(b.code ?? '—')}</span>
+        <span class="badge status-${b.status}">${STATUS_TEXT[b.status] ?? esc(b.status)}</span>
+      </div>
+      <div><b>${esc(b.spot_name)}</b> · Slot ${esc(b.slot_label)}</div>
+      <div class="muted small">${fmtDateTime(b.start_at)} – ${fmtDateTime(b.end_at)} · ${money(b.amount)}</div>
+      ${cancellable || b.code ? `
+        <div class="booking-actions">
+          ${b.code ? `<button class="btn ghost small" data-receipt="${b.id}">Details</button>` : ''}
+          ${cancellable ? `<button class="btn ghost small" data-cancel="${b.id}">Cancel &amp; refund</button>` : ''}
+        </div>` : ''}
+    </li>`;
+}
+
+/** "My bookings": upcoming bookings, or the paged history of past ones. */
+function showMyBookings(tab = 'upcoming') {
   openModal(`
     <h2>My bookings</h2>
-    ${visible.length ? '' : '<p class="muted">You have no bookings yet.</p>'}
-    <ul class="booking-list">
-      ${visible.map((b) => `
-        <li class="booking ${b.status}">
-          <div class="booking-head">
-            <span class="code">${esc(b.code ?? '—')}</span>
-            <span class="badge status-${b.status}">${STATUS_TEXT[b.status]}</span>
-          </div>
-          <div><b>${esc(b.spot_name)}</b> · Slot ${esc(b.slot_label)}</div>
-          <div class="muted small">${fmtDateTime(b.start_at)} – ${fmtDateTime(b.end_at)} · ${money(b.amount)}</div>
-          ${b.status === 'confirmed' && b.start_at > Date.now()
-            ? `<button class="btn ghost small" data-cancel="${b.id}">Cancel &amp; refund</button>` : ''}
-        </li>`).join('')}
-    </ul>`, refreshSpot);
+    <div class="tabs" role="tablist">
+      ${Object.entries(BOOKING_TABS).map(([key, t]) => `
+        <button class="tab" role="tab" data-tab="${key}" aria-selected="${key === tab}">${t.label}</button>`).join('')}
+    </div>
+    <ul class="booking-list" id="booking-list"></ul>
+    <p class="muted" id="bookings-status">Loading…</p>
+    <div class="actions"><button class="btn ghost small" id="load-more" hidden>Load more</button></div>`,
+  refreshSpot);
 
-  $('#modal-body').querySelectorAll('[data-cancel]').forEach((btn) => {
-    btn.onclick = async () => {
-      if (!confirm('Cancel this booking? The full amount will be refunded.')) return;
-      btn.disabled = true;
-      try {
-        await api(`/api/bookings/${btn.dataset.cancel}/cancel`, { method: 'POST' });
-        showMyBookings();
-      } catch (err) {
-        alert(err.message);
-        btn.disabled = false;
-      }
-    };
+  const list = $('#booking-list');
+  $('#modal-body').querySelectorAll('[data-tab]').forEach((btn) => {
+    btn.onclick = () => { if (btn.dataset.tab !== tab) showMyBookings(btn.dataset.tab); };
   });
+
+  list.onclick = async (e) => {
+    const receiptBtn = e.target.closest('[data-receipt]');
+    if (receiptBtn) return showReceipt(Number(receiptBtn.dataset.receipt), tab);
+    const cancelBtn = e.target.closest('[data-cancel]');
+    if (!cancelBtn || !confirm('Cancel this booking? The full amount will be refunded.')) return;
+    cancelBtn.disabled = true;
+    try {
+      await api(`/api/bookings/${cancelBtn.dataset.cancel}/cancel`, { method: 'POST' });
+      showMyBookings(tab);
+    } catch (err) {
+      alert(err.message);
+      cancelBtn.disabled = false;
+    }
+  };
+
+  const loadPage = async (offset) => {
+    const more = $('#load-more');
+    more.disabled = true;
+    try {
+      const page = await api(`/api/bookings?scope=${tab}&offset=${offset}`);
+      if (!list.isConnected) return; // the dialog moved on while this loaded
+      list.insertAdjacentHTML('beforeend', page.bookings.map(bookingItem).join(''));
+      $('#bookings-status').textContent = list.children.length ? '' : BOOKING_TABS[tab].empty;
+      more.hidden = !page.has_more;
+      more.onclick = () => loadPage(page.next_offset);
+    } catch (err) {
+      if (!list.isConnected) return;
+      $('#bookings-status').innerHTML = `<span class="error">${esc(err.message)}</span>`;
+    } finally {
+      more.disabled = false;
+    }
+  };
+  loadPage(0);
+}
+
+/** One booking with its payment trail. */
+async function showReceipt(bookingId, backTab) {
+  const back = '<button class="link" id="receipt-back">← My bookings</button>';
+  let b;
+  try {
+    b = await api(`/api/bookings/${bookingId}`);
+  } catch (err) {
+    openModal(`${back}<p class="error">${esc(err.message)}</p>`, refreshSpot);
+    $('#receipt-back').onclick = () => showMyBookings(backTab);
+    return;
+  }
+
+  openModal(`
+    ${back}
+    <h2>Booking <span class="code">${esc(b.code)}</span></h2>
+    <dl class="summary">
+      <dt>Status</dt><dd><span class="badge status-${b.status}">${STATUS_TEXT[b.status] ?? esc(b.status)}</span></dd>
+      <dt>Spot</dt><dd>${esc(b.spot_name)}<br><span class="muted small">${esc(b.spot_address)}</span></dd>
+      <dt>Slot</dt><dd>${esc(b.slot_label)}</dd>
+      <dt>Window</dt><dd>${fmtDateTime(b.start_at)} – ${fmtDateTime(b.end_at)} (${b.hours} h)</dd>
+      ${b.checked_in_at ? `<dt>Checked in</dt><dd>${fmtDateTime(b.checked_in_at)}</dd>` : ''}
+      <dt>Booked on</dt><dd>${fmtDateTime(b.created_at)}</dd>
+    </dl>
+    <h3 class="section-title">Payments</h3>
+    ${paymentList(b.payments, money)}`,
+  refreshSpot);
+  $('#receipt-back').onclick = () => showMyBookings(backTab);
 }
 
 // ---------------------------------------------------------------- auth
@@ -405,7 +469,7 @@ function renderAuthArea() {
       <span class="who">Hi, ${esc(state.user.name)}</span>
       <button class="btn ghost" id="bookings-btn">My bookings</button>
       <button class="btn ghost" id="logout-btn">Log out</button>`;
-    $('#bookings-btn').onclick = showMyBookings;
+    $('#bookings-btn').onclick = () => showMyBookings();
     $('#logout-btn').onclick = async () => {
       await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
       setSession(null, null);
@@ -426,6 +490,7 @@ function showAuth(onDone, mode = 'login') {
       <label>Email <input name="email" type="email" required autocomplete="email"></label>
       <label>Password <input name="password" type="password" required minlength="8"
         autocomplete="${isLogin ? 'current-password' : 'new-password'}"></label>
+      ${isLogin ? '<a href="#" class="small inline-link" id="forgot-link">Forgot password?</a>' : ''}
       <p class="error" id="auth-error"></p>
       <div class="actions"><button class="btn primary">${isLogin ? 'Log in' : 'Sign up'}</button></div>
     </form>
@@ -439,6 +504,12 @@ function showAuth(onDone, mode = 'login') {
     e.preventDefault();
     showAuth(onDone, isLogin ? 'register' : 'login');
   };
+  if (isLogin) {
+    $('#forgot-link').onclick = (e) => {
+      e.preventDefault();
+      showForgotPassword(onDone, $('#auth-form').email.value);
+    };
+  }
   $('#auth-form').onsubmit = async (e) => {
     e.preventDefault();
     try {
@@ -451,6 +522,92 @@ function showAuth(onDone, mode = 'login') {
       $('#auth-error').textContent = err.message;
     }
   };
+}
+
+// ---------------------------------------------------------------- password reset
+
+/** Step 1: ask for a reset link by email. */
+function showForgotPassword(onDone, email = '') {
+  openModal(`
+    <h2>Reset your password</h2>
+    <p class="muted small">Enter your account's email and we'll send you a link to choose a new password.</p>
+    <form id="forgot-form" class="form">
+      <label>Email <input name="email" type="email" required autocomplete="email" value="${esc(email)}"></label>
+      <p class="error" id="forgot-error"></p>
+      <div class="actions">
+        <button type="button" class="btn ghost" id="forgot-back">Back to log in</button>
+        <button class="btn primary" id="forgot-send">Send reset link</button>
+      </div>
+    </form>`);
+
+  $('#forgot-back').onclick = () => showAuth(onDone);
+  $('#forgot-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const sendBtn = $('#forgot-send');
+    sendBtn.disabled = true;
+    try {
+      const { message } = await api('/api/auth/password-reset/request', {
+        method: 'POST',
+        body: { email: e.target.email.value },
+      });
+      openModal(`
+        <h2>Check your email</h2>
+        <p>${esc(message)}</p>
+        <p class="muted small">The link works once and expires in ${state.config.resetTokenMinutes} minutes.
+          If nothing arrives, check your spam folder or try again in a minute.</p>
+        <p class="muted small">Prototype: emails are printed in the server console instead of being sent.</p>
+        <div class="actions"><button class="btn primary" id="forgot-done">Back to log in</button></div>`);
+      $('#forgot-done').onclick = () => showAuth(onDone);
+    } catch (err) {
+      $('#forgot-error').textContent = err.message;
+      sendBtn.disabled = false;
+    }
+  };
+}
+
+/** Step 2: the emailed link opens the app at /#reset=<token>. */
+function showResetPassword(token) {
+  openModal(`
+    <h2>Choose a new password</h2>
+    <form id="reset-form" class="form">
+      <label>New password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+      <label>Confirm new password <input name="confirm" type="password" required minlength="8" autocomplete="new-password"></label>
+      <p class="error" id="reset-error"></p>
+      <div class="actions"><button class="btn primary" id="reset-btn">Set new password</button></div>
+    </form>
+    <p class="muted small">This signs you out on every other device.</p>`);
+
+  $('#reset-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const { password, confirm } = Object.fromEntries(new FormData(e.target));
+    const error = $('#reset-error');
+    if (password !== confirm) {
+      error.textContent = 'The two passwords do not match.';
+      return;
+    }
+    $('#reset-btn').disabled = true;
+    try {
+      const session = await api('/api/auth/password-reset/confirm', { method: 'POST', body: { token, password } });
+      setSession(session.token, session.user);
+      openModal(`
+        <h2>Password updated</h2>
+        <p>You're logged in as <b>${esc(session.user.email)}</b>.</p>
+        <div class="actions"><button class="btn primary" id="reset-done">Done</button></div>`);
+      $('#reset-done').onclick = closeModal;
+    } catch (err) {
+      error.innerHTML = `${esc(err.message)}${err.data?.reason === 'invalid_reset_token'
+        ? ' <a href="#" id="reset-again">Request a new link</a>' : ''}`;
+      $('#reset-again')?.addEventListener('click', (ev) => { ev.preventDefault(); showForgotPassword(null); });
+      $('#reset-btn').disabled = false;
+    }
+  };
+}
+
+/** Takes a reset token from the URL and removes it, so it is not left in the address bar or history. */
+function takeResetToken() {
+  const token = new URLSearchParams(location.hash.slice(1)).get('reset');
+  if (token) history.replaceState(null, '', location.pathname + location.search);
+  return token;
 }
 
 // ---------------------------------------------------------------- init
@@ -475,6 +632,14 @@ async function init() {
 
   const { lat, lng } = state.config.defaultCenter;
   setCenter(lat, lng, 14);
+
+  const openResetFromUrl = () => {
+    const resetToken = takeResetToken();
+    if (resetToken) showResetPassword(resetToken);
+  };
+  openResetFromUrl();
+  // A reset link pasted into a tab that already has the app open only changes the hash.
+  window.addEventListener('hashchange', openResetFromUrl);
 }
 
 init().catch((err) => {

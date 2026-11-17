@@ -2,9 +2,17 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { config, HOUR_MS } from './config.js';
 import { openDb, transaction } from './db.js';
-import { hashPassword } from './services/auth.js';
+import { createAccount, hasAdmin, hashPassword } from './services/auth.js';
 
 export const DEMO_USER = { name: 'Demo User', email: 'demo@parking.test', password: 'demo1234' };
+export const DEMO_ADMIN = { name: 'Demo Admin', email: 'admin@parking.test', password: 'admin1234' };
+
+/** Creates the demo admin account if there is no admin yet. Returns true if it did. */
+export function ensureDemoAdmin(db, now = Date.now()) {
+  if (hasAdmin(db)) return false;
+  createAccount(db, { ...DEMO_ADMIN, role: 'admin' }, now);
+  return true;
+}
 
 const SPOT_NAMES = [
   'Central Plaza Parking', 'Metro Station Lot', 'City Mall Basement', 'Riverside Parking',
@@ -45,6 +53,16 @@ export function seedDemoData(db, center, now = Date.now()) {
       user = { id: Number(lastInsertRowid) };
     }
 
+    const insertPayment = db.prepare(`
+      INSERT INTO payments (booking_id, amount, status, provider_ref, card_last4, created_at)
+      VALUES (?, ?, 'succeeded', ?, '4242', ?)
+    `);
+    // Demo bookings are paid, so each gets the payment record a real checkout would leave.
+    const book = (...args) => {
+      const { lastInsertRowid } = insertBooking.run(...args);
+      insertPayment.run(lastInsertRowid, args[6], `mock_ch_demo_${lastInsertRowid}`, now);
+    };
+
     let codeSeq = 0;
     SPOT_NAMES.forEach((name, i) => {
       // Spread spots 0.3-4 km from the centre in all directions.
@@ -66,14 +84,14 @@ export function seedDemoData(db, center, now = Date.now()) {
         if (roll < 0.2) {
           // Parked right now.
           const start = now - HOUR_MS;
-          insertBooking.run(code(), slotId, user.id, start, start + 3 * HOUR_MS, 3, rate * 3, 'checked_in', start, now);
+          book(code(), slotId, user.id, start, start + 3 * HOUR_MS, 3, rate * 3, 'checked_in', start, now);
         } else if (roll < 0.35) {
           // Paid for, driver not arrived yet.
-          insertBooking.run(code(), slotId, user.id, now, now + 2 * HOUR_MS, 2, rate * 2, 'confirmed', null, now);
+          book(code(), slotId, user.id, now, now + 2 * HOUR_MS, 2, rate * 2, 'confirmed', null, now);
         } else if (roll < 0.45) {
           // Free now, booked later today.
           const start = now + 3 * HOUR_MS;
-          insertBooking.run(code(), slotId, user.id, start, start + 2 * HOUR_MS, 2, rate * 2, 'confirmed', null, now);
+          book(code(), slotId, user.id, start, start + 2 * HOUR_MS, 2, rate * 2, 'confirmed', null, now);
         }
       }
     });
@@ -97,4 +115,5 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (values.reset) db.exec('DELETE FROM payments; DELETE FROM bookings; DELETE FROM slots; DELETE FROM parking_spots;');
   seedDemoData(db, center);
   console.log(`Seeded ${SPOT_NAMES.length} demo parking spots around ${center.lat}, ${center.lng}`);
+  if (ensureDemoAdmin(db)) console.log(`Created demo admin: ${DEMO_ADMIN.email} / ${DEMO_ADMIN.password}`);
 }

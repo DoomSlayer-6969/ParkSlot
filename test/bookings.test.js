@@ -3,7 +3,9 @@ import { test } from 'node:test';
 import { HOUR_MS, MINUTE_MS } from '../src/config.js';
 import { openDb } from '../src/db.js';
 import { register } from '../src/services/auth.js';
-import { cancelBooking, checkIn, createHold, listUserBookings, payForBooking } from '../src/services/bookings.js';
+import {
+  cancelBooking, checkIn, createHold, getUserBooking, listAllBookings, listUserBookings, payForBooking,
+} from '../src/services/bookings.js';
 import { createMockGateway, TEST_CARDS } from '../src/services/payments.js';
 import { findNearby, getSpot } from '../src/services/spots.js';
 
@@ -78,7 +80,7 @@ test('an expired hold releases the slot and can no longer be paid', async () => 
     payForBooking(ctx.db, ctx.gateway, { bookingId: hold.id, userId: ctx.alice, card: card() }, ctx.clock),
     { status: 410 },
   );
-  assert.equal(listUserBookings(ctx.db, ctx.alice, ctx.clock())[0].status, 'expired');
+  assert.equal(listUserBookings(ctx.db, ctx.alice, ctx.clock()).bookings[0].status, 'expired');
 });
 
 test('a declined card leaves the booking unpaid and retryable', async () => {
@@ -167,4 +169,76 @@ test('nearby search returns only spots within the radius, nearest first', () => 
   assert.deepEqual(spots.map((s) => s.name), ['Near Lot', 'Far Lot']);
   assert.equal(spots[0].total_slots, 2);
   assert.equal(spots[0].free_slots, 2);
+});
+
+// ---------------------------------------------------------------- booking history
+
+test('booking history lists finished paid bookings, newest first, and leaves out abandoned checkouts', async () => {
+  const ctx = setup();
+  const lapsed = await bookAndPay(ctx, ctx.alice, { slotId: 1, startAt: T0, hours: 1 });
+  const completed = await bookAndPay(ctx, ctx.alice, { slotId: 2, startAt: T0, hours: 1 });
+  checkIn(ctx.db, completed.code, ctx.clock());
+  const refunded = await bookAndPay(ctx, ctx.alice, { slotId: 1, startAt: T0 + 3 * HOUR_MS, hours: 1 });
+  await cancelBooking(ctx.db, ctx.gateway, { bookingId: refunded.id, userId: ctx.alice }, ctx.clock);
+  const released = createHold(ctx.db, { userId: ctx.alice, slotId: 2, startAt: T0 + 5 * HOUR_MS, hours: 1 }, ctx.clock());
+  await cancelBooking(ctx.db, ctx.gateway, { bookingId: released.id, userId: ctx.alice }, ctx.clock);
+  createHold(ctx.db, { userId: ctx.alice, slotId: 3, startAt: T0 + 4 * HOUR_MS, hours: 1 }, ctx.clock()); // will expire
+  const future = await bookAndPay(ctx, ctx.alice, { slotId: 1, startAt: T0 + 48 * HOUR_MS, hours: 1 });
+  await bookAndPay(ctx, ctx.bob, { slotId: 3, startAt: T0 + 24 * HOUR_MS, hours: 1 });
+
+  ctx.advance(2 * HOUR_MS);
+  const list = (scope, page = {}) => listUserBookings(ctx.db, ctx.alice, ctx.clock(), { scope, ...page });
+
+  const history = list('history');
+  assert.deepEqual(history.bookings.map((b) => [b.id, b.status]), [
+    [refunded.id, 'cancelled'],
+    [completed.id, 'completed'],
+    [lapsed.id, 'lapsed'],
+  ]);
+  assert.equal(history.has_more, false);
+  assert.deepEqual(list('upcoming').bookings.map((b) => b.id), [future.id]);
+  assert.equal(list('all').bookings.length, 6); // everything of Alice's, none of Bob's
+
+  const first = list('history', { limit: 2 });
+  assert.deepEqual([first.bookings.length, first.has_more, first.next_offset], [2, true, 2]);
+  const second = list('history', { limit: 2, offset: first.next_offset });
+  assert.deepEqual([second.bookings.map((b) => b.id), second.has_more, second.next_offset], [[lapsed.id], false, null]);
+
+  assert.throws(() => list('bogus'), { status: 400 });
+  assert.throws(() => list('history', { limit: 0 }), { status: 400 });
+  assert.throws(() => list('history', { limit: 101 }), { status: 400 });
+  assert.throws(() => list('history', { offset: -1 }), { status: 400 });
+});
+
+test('a booking receipt lists every payment attempt and refund, and only its owner can see it', async () => {
+  const ctx = setup();
+  const hold = createHold(ctx.db, { userId: ctx.alice, slotId: 1, startAt: T0 + HOUR_MS, hours: 2 }, ctx.clock());
+  const pay = (number) => payForBooking(ctx.db, ctx.gateway, { bookingId: hold.id, userId: ctx.alice, card: card(number) }, ctx.clock);
+  await assert.rejects(pay(TEST_CARDS.declined), { status: 402 });
+  await pay(TEST_CARDS.success);
+  await cancelBooking(ctx.db, ctx.gateway, { bookingId: hold.id, userId: ctx.alice }, ctx.clock);
+
+  const receipt = getUserBooking(ctx.db, { bookingId: hold.id, userId: ctx.alice }, ctx.clock());
+  assert.equal(receipt.status, 'cancelled');
+  assert.deepEqual(receipt.payments.map((p) => [p.status, p.amount, p.card_last4]), [
+    ['failed', 10000, null],
+    ['succeeded', 10000, '4242'],
+    ['refunded', 10000, '4242'],
+  ]);
+  assert.ok(!('provider_ref' in receipt.payments[0]));
+  assert.throws(() => getUserBooking(ctx.db, { bookingId: hold.id, userId: ctx.bob }, ctx.clock()), { status: 404 });
+});
+
+test('admins can search every booking by code, driver name or email', async () => {
+  const ctx = setup();
+  const alices = await bookAndPay(ctx, ctx.alice, { slotId: 1 });
+  const bobs = await bookAndPay(ctx, ctx.bob, { slotId: 2 });
+  const search = (q) => listAllBookings(ctx.db, ctx.clock(), { q }).bookings.map((b) => b.id);
+
+  assert.deepEqual(search('').sort(), [alices.id, bobs.id].sort());
+  assert.deepEqual(search('BOB@test'), [bobs.id]);
+  assert.deepEqual(search('alice'), [alices.id]);
+  assert.deepEqual(search(alices.code.toLowerCase()), [alices.id]);
+  assert.deepEqual(search('%'), []); // LIKE wildcards are matched literally
+  assert.equal(listAllBookings(ctx.db, ctx.clock()).bookings[0].user_email.endsWith('@test.dev'), true);
 });

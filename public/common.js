@@ -52,3 +52,23 @@ export const STATUS_TEXT = {
   cancelled: 'Cancelled',
   expired: 'Expired',
 };
+
+export const PAYMENT_TEXT = {
+  succeeded: 'Paid',
+  failed: 'Declined (not charged)',
+  refunded: 'Refunded',
+};
+
+/** Payment trail of a booking, as returned in a booking's `payments`. */
+export function paymentList(payments, formatMoney) {
+  if (!payments.length) return '<p class="muted small">No payments.</p>';
+  return `
+    <ul class="payment-list">
+      ${payments.map((p) => `
+        <li class="payment ${p.status}">
+          <span>${PAYMENT_TEXT[p.status] ?? esc(p.status)}${p.card_last4 ? ` · card ending ${esc(p.card_last4)}` : ''}
+            <br><span class="muted small">${fmtDateTime(p.created_at)}</span></span>
+          <b>${p.status === 'refunded' ? '−' : ''}${formatMoney(p.amount)}</b>
+        </li>`).join('')}
+    </ul>`;
+}

@@ -19,6 +19,8 @@
 }
 
 * { box-sizing: border-box; }
+/* Elements given a display (grid, flex) would otherwise ignore the hidden attribute. */
+[hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; }
 body { background: var(--bg); display: flex; flex-direction: column; }
 h1, h2 { margin: 0 0 0.5rem; line-height: 1.25; }
@@ -133,6 +135,7 @@ dialog::backdrop { background: rgb(17 24 39 / 0.45); }
 
 .form { display: grid; gap: 0.6rem; }
 .form .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+.form .inline-link { justify-self: start; }
 .actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem; }
 
 .summary { display: grid; grid-template-columns: auto 1fr; gap: 0.35rem 1rem; margin: 1rem 0; }
@@ -151,11 +154,51 @@ dialog::backdrop { background: rgb(17 24 39 / 0.45); }
 .booking-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.6rem; max-height: 60vh; overflow-y: auto; }
 .booking { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem; display: grid; gap: 0.3rem; justify-items: start; }
 .booking-head { display: flex; justify-content: space-between; width: 100%; align-items: center; }
+.booking-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 .status-confirmed { background: var(--free-bg); color: var(--free); }
 .status-checked_in { background: #dbeafe; color: var(--primary); }
+.status-pending_payment { background: var(--booked-bg); color: var(--booked); }
 .status-cancelled, .status-lapsed { background: var(--occupied-bg); color: var(--occupied); }
 
-/* ---------- attendant ---------- */
+.tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--border); margin: 0.5rem 0 0.75rem; }
+.tab {
+  font: inherit; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  padding: 0.45rem 0.8rem; color: var(--muted); cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+
+h3.section-title { margin: 1rem 0 0.5rem; }
+.payment-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.4rem; }
+.payment { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 8px; }
+.payment.failed { color: var(--muted); }
+.payment.failed b { text-decoration: line-through; }
+.payment.refunded b { color: var(--free); }
+
+/* ---------- admin portal ---------- */
+
+.portal-tag {
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 0.15rem 0.45rem; border-radius: 6px; background: var(--text); color: var(--surface);
+}
+.admin-main { width: min(1100px, calc(100vw - 2rem)); margin: 1rem auto 2rem; }
+.narrow-left { width: min(480px, 100%); display: grid; gap: 1rem; }
+
+.filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.filters input { flex: 1 1 220px; width: auto; }
+select {
+  font: inherit; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text);
+}
+
+.table-wrap { overflow-x: auto; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); }
+.bookings-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.bookings-table th, .bookings-table td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.bookings-table th { color: var(--muted); font-weight: 600; font-size: 0.8rem; white-space: nowrap; }
+.bookings-table tbody tr { cursor: pointer; }
+.bookings-table tbody tr:hover, .bookings-table tbody tr:focus { background: var(--bg); outline: none; }
+
+/* ---------- check-in ---------- */
 
 .narrow { width: min(480px, calc(100vw - 2rem)); margin: 2rem auto; display: grid; gap: 1rem; }
 .card { background: var(--surface); border-radius: 14px; padding: 1.5rem; box-shadow: var(--shadow); }

@@ -11,6 +11,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "seed": "node src/seed.js",
+    "create-admin": "node src/create-admin.js",
     "test": "node --test"
   },
   "dependencies": {

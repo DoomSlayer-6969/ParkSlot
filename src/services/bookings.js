@@ -7,13 +7,38 @@ import { findConflict, resolveWindow } from './availability.js';
 // No 0/O, 1/I/L so the code is easy to read out at the gate.
 const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 
-const BOOKING_SELECT = `
-  SELECT b.id, b.code, b.user_id, b.slot_id, b.start_at, b.end_at, b.hours, b.amount, b.status,
-         b.hold_expires_at, b.checked_in_at, b.created_at,
-         s.label AS slot_label, p.id AS spot_id, p.name AS spot_name, p.address AS spot_address
+const BOOKING_COLUMNS = `
+  b.id, b.code, b.user_id, b.slot_id, b.start_at, b.end_at, b.hours, b.amount, b.status,
+  b.hold_expires_at, b.checked_in_at, b.created_at,
+  s.label AS slot_label, p.id AS spot_id, p.name AS spot_name, p.address AS spot_address`;
+const BOOKING_FROM = `
   FROM bookings b
   JOIN slots s ON s.id = b.slot_id
   JOIN parking_spots p ON p.id = s.spot_id`;
+const BOOKING_SELECT = `SELECT ${BOOKING_COLUMNS} ${BOOKING_FROM}`;
+// Admins also see who made the booking.
+const ADMIN_BOOKING_SELECT = `SELECT ${BOOKING_COLUMNS}, u.name AS user_name, u.email AS user_email
+  ${BOOKING_FROM} JOIN users u ON u.id = b.user_id`;
+
+// Listing filters, written against the *stored* status since effective statuses are derived.
+//   upcoming - holds still running, and paid bookings whose window has not ended (incl. parked now)
+//   history  - paid bookings that are over: completed, lapsed (never used) or cancelled with a refund.
+//              Abandoned checkouts (expired or released holds) were never paid, so they are left out.
+const SCOPES = {
+  all: { where: '1', order: 'b.start_at DESC, b.id DESC', usesNow: false },
+  upcoming: {
+    where: `((b.status IN ('confirmed', 'checked_in') AND b.end_at > $now)
+      OR (b.status = 'pending_payment' AND b.hold_expires_at > $now))`,
+    order: 'b.start_at ASC, b.id ASC',
+    usesNow: true,
+  },
+  history: {
+    where: "(b.code IS NOT NULL AND (b.status = 'cancelled' OR b.end_at <= $now))",
+    order: 'b.start_at DESC, b.id DESC',
+    usesNow: true,
+  },
+};
+export const BOOKING_SCOPES = Object.keys(SCOPES);
 
 function generateCode(db) {
   for (;;) {
@@ -147,8 +172,70 @@ export function checkIn(db, code, now) {
   return present(db.prepare(`${BOOKING_SELECT} WHERE b.id = ?`).get(booking.id), now);
 }
 
-export function listUserBookings(db, userId, now) {
-  return db.prepare(`${BOOKING_SELECT} WHERE b.user_id = ? ORDER BY b.start_at DESC`)
-    .all(userId)
-    .map((b) => present(b, now));
+function readPage(limit, offset) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > config.maxPageSize) {
+    throw new HttpError(400, `limit must be a whole number between 1 and ${config.maxPageSize}`);
+  }
+  if (!Number.isInteger(offset) || offset < 0) throw new HttpError(400, 'offset must be a whole number of 0 or more');
+  return { limit, offset };
+}
+
+/** One page of bookings matching `where` (SQL conditions) and a scope from SCOPES. */
+function pageOfBookings(db, select, { where = [], params = {} }, { scope, limit, offset }, now) {
+  const view = SCOPES[scope];
+  if (!view) throw new HttpError(400, `scope must be one of: ${BOOKING_SCOPES.join(', ')}`);
+  const page = readPage(limit, offset);
+
+  // Fetch one extra row to learn whether another page exists.
+  const rows = db.prepare(`
+    ${select}
+    WHERE ${[...where, view.where].join(' AND ')}
+    ORDER BY ${view.order}
+    LIMIT $limit OFFSET $offset
+  `).all({ ...params, ...(view.usesNow ? { now } : {}), limit: page.limit + 1, offset: page.offset });
+
+  const hasMore = rows.length > page.limit;
+  return {
+    bookings: rows.slice(0, page.limit).map((b) => present(b, now)),
+    has_more: hasMore,
+    next_offset: hasMore ? page.offset + page.limit : null,
+  };
+}
+
+/** A driver's own bookings. `scope` is 'all', 'upcoming' or 'history'. */
+export function listUserBookings(db, userId, now, { scope = 'all', limit = config.pageSize, offset = 0 } = {}) {
+  return pageOfBookings(db, BOOKING_SELECT, { where: ['b.user_id = $userId'], params: { userId } },
+    { scope, limit, offset }, now);
+}
+
+/** Admin view of every booking. `q` matches part of the booking code, or the driver's name or email. */
+export function listAllBookings(db, now, { q, scope = 'all', limit = config.pageSize, offset = 0 } = {}) {
+  const term = String(q ?? '').trim();
+  const filter = term
+    ? {
+      where: ["(b.code LIKE $like ESCAPE '\\' OR u.email LIKE $like ESCAPE '\\' OR u.name LIKE $like ESCAPE '\\')"],
+      params: { like: `%${term.replace(/[\\%_]/g, '\\$&')}%` },
+    }
+    : {};
+  return pageOfBookings(db, ADMIN_BOOKING_SELECT, filter, { scope, limit, offset }, now);
+}
+
+// Every charge attempt and refund, oldest first. Provider references stay server-side.
+function withPayments(db, booking, now) {
+  const payments = db.prepare(`
+    SELECT status, amount, card_last4, created_at FROM payments WHERE booking_id = ? ORDER BY id
+  `).all(booking.id);
+  return { ...present(booking, now), payments };
+}
+
+/** One of the driver's own bookings with its payment history (the receipt). */
+export function getUserBooking(db, { bookingId, userId }, now) {
+  return withPayments(db, loadOwnBooking(db, bookingId, userId), now);
+}
+
+/** Any booking, with the driver's details and payment history. */
+export function getBookingForAdmin(db, bookingId, now) {
+  const booking = db.prepare(`${ADMIN_BOOKING_SELECT} WHERE b.id = ?`).get(bookingId);
+  if (!booking) throw new HttpError(404, 'Booking not found');
+  return withPayments(db, booking, now);
 }
